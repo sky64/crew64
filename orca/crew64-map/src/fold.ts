@@ -19,7 +19,7 @@ export function slugOf(title: string): string {
 
 function emptyTask(n: number, title: string): LedgerTask {
   return {
-    task: n, title, tier: null, rung: null, mode: null, model: null, worktree: null, branch: null,
+    task: n, title, tier: null, rung: null, mode: null, model: null, model_source: null, worktree: null, branch: null,
     dispatch: null, reviews: 0, escalations: 0, tokens_in: null, tokens_out: null, pr: null,
     pr_url: null, merged: false, abandoned: false, last_event: 'planned', last_ts: ''
   }
@@ -82,12 +82,12 @@ function buildRow(t: LedgerTask, plan: PlanRow | undefined, live: Live, allowanc
       ? cell({ in: t.tokens_in, out: t.tokens_out })
       : trailer
         ? cell(trailer, true)
-        : cell(null)
+        : cell<{ in: number | null; out: number | null }>(null)
   // The model is a fact only when a dispatched/native_started event named it (model_source 'launch');
   // a planned model, a plan-row model, or a ledger without model_source is inferred (Codex task 4, cycle 2).
   const intended = t.model ?? plan?.model ?? null
   const model: Cell<string> =
-    t.model_source === 'launch' && t.model !== null ? cell(t.model) : intended !== null ? cell(intended, true) : cell(null)
+    t.model_source === 'launch' && t.model !== null ? cell(t.model) : intended !== null ? cell(intended, true) : cell<string>(null)
   return {
     task: t.task,
     title: t.title ?? plan?.title ?? `Task ${t.task}`,
