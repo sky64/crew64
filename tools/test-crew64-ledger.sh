@@ -138,4 +138,34 @@ R5="$TMP/empty"; newrepo "$R5" true
 got="$(L "$R5" show --json | J "(d['plans'], d['skipped_lines'])")"
 [ "$got" = "([], 0)" ] && ok "show_without_log_is_empty" || bad "show_without_log_is_empty: $got"
 
+# Codex task 2: malformed event shapes are skipped and counted, never folded
+R6="$TMP/shapes"; newrepo "$R6" true
+L "$R6" record --plan "$P" --task 1 --event planned --field title=ok >/dev/null
+log6="$(L "$R6" path)/2026-11-19-demo.jsonl"
+printf '%s\n' '{"v":1,"ts":"2026-11-25T00:00:00+00:00","task":true,"event":"planned","plan":"'"$P"'"}' \
+  '{"v":1,"ts":"2026-11-25T00:00:00+00:00","task":2,"event":"planned","plan":"'"$P"'","title":["wrong type"]}' \
+  '{"v":1,"task":3,"event":"planned","plan":"'"$P"'"}' \
+  '{"v":1,"ts":"2026-11-25T00:00:00+00:00","task":4,"event":"planned","plan":"'"$P"'","rung":"one"}' >> "$log6"
+got="$(L "$R6" show --json | J "(d['skipped_lines'], [t['task'] for t in d['plans'][0]['tasks']])")"
+[ "$got" = "(4, [1])" ] && ok "malformed_shapes_skipped" || bad "malformed_shapes_skipped: $got"
+# known string fields stay strings, known integer fields must be integers
+L "$R6" record --plan "$P" --task 5 --event planned --field title=5 --field model=2 >/dev/null
+got="$(L "$R6" show --json | J "[(t['title'],t['model']) for t in d['plans'][0]['tasks'] if t['task']==5][0]")"
+[ "$got" = "('5', '2')" ] && ok "numeric_looking_strings_stay_strings" || bad "numeric_looking_strings_stay_strings: $got"
+L "$R6" record --plan "$P" --task 5 --event planned --field rung=one >/dev/null; rc=$?
+[ "$rc" = 2 ] && ok "non_integer_rung_exit_2" || bad "non_integer_rung_exit_2: rc=$rc"
+L "$R6" record --plan "$P" --task 5 --event planned --field 'deps=["a"]' >/dev/null; rc=$?
+[ "$rc" = 2 ] && ok "deps_must_be_task_numbers" || bad "deps_must_be_task_numbers: rc=$rc"
+
+# Codex task 2: a short write is rolled back and reported, the next event stays whole
+R7="$TMP/short"; newrepo "$R7" true
+L "$R7" record --plan "$P" --task 1 --event planned --field title=first >/dev/null
+log7="$(L "$R7" path)/2026-11-19-demo.jsonl"; size0="$(stat -c %s "$log7")"
+big="$(head -c 4096 /dev/zero | tr '\0' 'y')"
+out="$( (ulimit -f 1; cd "$R7" && python3 -I "$LEDGER" record --plan "$P" --task 2 --event planned --field title="$big") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [ "$(stat -c %s "$log7")" = "$size0" ] && case "$out" in *"short write"*) true;; *) false;; esac && ok "short_write_rolled_back" || bad "short_write_rolled_back: rc=$rc size=$(stat -c %s "$log7") was=$size0 out=$out"
+L "$R7" record --plan "$P" --task 3 --event planned --field title=after >/dev/null
+got="$(L "$R7" show --json | J "(d['skipped_lines'], [t['task'] for t in d['plans'][0]['tasks']])")"
+[ "$got" = "(0, [1, 3])" ] && ok "next_event_whole_after_short_write" || bad "next_event_whole_after_short_write: $got"
+
 exit $fail

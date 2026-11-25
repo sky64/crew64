@@ -19,6 +19,7 @@ crew64_config.py resolved them, so the panel never reads .claude/crew64.json.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -45,6 +46,15 @@ SETS = {
     "native_started": ("worktree", "branch", "model"),
     "pr_opened": ("pr", "pr_url"),
 }
+# Known fields and their types: a string field keeps its text as given (a title
+# "5" stays "5"), an integer field must be an integer, deps a list of task
+# numbers. Unknown fields parse as JSON when they parse, else as strings.
+STR_FIELDS = (
+    "title", "tier", "mode", "vendor", "model", "worktree", "branch", "dispatch", "agent",
+    "pr_url", "sha", "verdict", "reason", "token_source", "plan_branch", "plan_commit",
+)
+INT_FIELDS = ("rung", "pr", "cycle", "tokens_in", "tokens_out")
+INT_TEXT = re.compile(r"-?[0-9]+")
 GITHUB_URL = re.compile(r"(?:github\.com[:/])([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 
 
@@ -122,25 +132,59 @@ def _parse_value(text: str):
         return text
 
 
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _field_ok(key: str, value) -> bool:
+    if key in STR_FIELDS:
+        return isinstance(value, str)
+    if key in INT_FIELDS:
+        return _is_int(value)
+    if key == "deps":
+        return isinstance(value, list) and all(_is_int(n) for n in value)
+    return True
+
+
 def parse_fields(pairs) -> dict:
     fields = {}
     for pair in pairs or []:
-        key, sep, value = pair.partition("=")
+        key, sep, text = pair.partition("=")
         if not sep or not key:
             raise ValueError(f"--field needs key=value, got {pair!r}")
         if key in ("v", "ts", "plan", "task", "event"):
             raise ValueError(f"--field cannot set the reserved key {key!r}")
-        fields[key] = _parse_value(value)
+        if key in STR_FIELDS:
+            value = text
+        elif key in INT_FIELDS:
+            if not INT_TEXT.fullmatch(text):
+                raise ValueError(f"--field {key} must be an integer, got {text!r}")
+            value = int(text)
+        else:
+            value = _parse_value(text)
+        if not _field_ok(key, value):
+            raise ValueError(f"--field {key} must be a list of task numbers, got {text!r}")
+        fields[key] = value
     return fields
 
 
 def append_event(path: Path, event: dict) -> None:
-    """One O_APPEND write of one line, so concurrent writers never interleave a line."""
+    """Append one line under an exclusive lock. A short write (disk full, file
+    size limit) is cut back to the size before the append and reported, so a
+    partial line never survives to swallow the next event (Codex, task 2)."""
     _no_symlink(path)
     line = (json.dumps(event, separators=(",", ":")) + "\n").encode()
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, line)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        before = os.fstat(fd).st_size
+        try:
+            written = os.write(fd, line)
+        except OSError:
+            written = -1
+        if written != len(line):
+            os.ftruncate(fd, before)
+            raise LedgerError(f"short write to {path} ({written} of {len(line)} bytes); event not recorded")
     finally:
         os.close(fd)
 
@@ -192,8 +236,13 @@ def _apply(task: dict, ev: dict) -> None:
 
 
 def _valid(ev) -> bool:
-    return (isinstance(ev, dict) and isinstance(ev.get("task"), int)
-            and ev.get("event") in EVENTS and isinstance(ev.get("plan"), str))
+    if not isinstance(ev, dict):
+        return False
+    if ev.get("v") != LOG_VERSION or not isinstance(ev.get("ts"), str) or not isinstance(ev.get("plan"), str):
+        return False
+    if not _is_int(ev.get("task")) or ev.get("event") not in EVENTS:
+        return False
+    return all(_field_ok(key, value) for key, value in ev.items())
 
 
 def fold_file(path: Path):
