@@ -64,6 +64,8 @@ export type LedgerTask = {
   rung: number | null
   mode: string | null
   model: string | null
+  /** 'launch' when a dispatched/native_started event named the model; only then is it a fact. */
+  model_source: 'planned' | 'launch' | null
   worktree: string | null
   branch: string | null
   dispatch: string | null

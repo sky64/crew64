@@ -168,4 +168,17 @@ L "$R7" record --plan "$P" --task 3 --event planned --field title=after >/dev/nu
 got="$(L "$R7" show --json | J "(d['skipped_lines'], [t['task'] for t in d['plans'][0]['tasks']])")"
 [ "$got" = "(0, [1, 3])" ] && ok "next_event_whole_after_short_write" || bad "next_event_whole_after_short_write: $got"
 
+# Codex task 4 cycle 2: the model's provenance travels with it
+R8="$TMP/prov"; newrepo "$R8" true
+L "$R8" record --plan "$P" --task 1 --event planned --field model=claude-opus-5-5 >/dev/null
+L "$R8" record --plan "$P" --task 1 --event dispatched --field worktree=/w/p --field dispatch=ctx_1 >/dev/null
+got="$(L "$R8" show --json | J "[(t['model'],t['model_source']) for t in d['plans'][0]['tasks']][0]")"
+[ "$got" = "('claude-opus-5-5', 'planned')" ] && ok "launch_without_model_keeps_planned_source" || bad "launch_without_model_keeps_planned_source: $got"
+L "$R8" record --plan "$P" --task 1 --event native_started --field model=claude-fable-5-1 >/dev/null
+got="$(L "$R8" show --json | J "[(t['model'],t['model_source']) for t in d['plans'][0]['tasks']][0]")"
+[ "$got" = "('claude-fable-5-1', 'launch')" ] && ok "launch_with_model_sets_launch_source" || bad "launch_with_model_sets_launch_source: $got"
+L "$R8" record --plan "$P" --task 2 --event review --field cycle=1 >/dev/null
+got="$(L "$R8" show --json | J "[t['model_source'] for t in d['plans'][0]['tasks'] if t['task']==2][0]")"
+[ "$got" = "None" ] && ok "no_model_no_source" || bad "no_model_no_source: $got"
+
 exit $fail

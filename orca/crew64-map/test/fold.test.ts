@@ -6,7 +6,7 @@ const WT = '/w/crew64-map-t4'
 
 function task(over: Partial<LedgerTask> = {}): LedgerTask {
   return {
-    task: 1, title: 'Add the parser', tier: 'normal', rung: 1, mode: 'delegated', model: 'claude-sonnet-5-5',
+    task: 1, title: 'Add the parser', tier: 'normal', rung: 1, mode: 'delegated', model: 'claude-sonnet-5-5', model_source: 'launch',
     worktree: WT, branch: 'sky64/add-the-parser', dispatch: 'ctx_1', reviews: 0, escalations: 0,
     tokens_in: null, tokens_out: null, pr: null, pr_url: null, merged: false, abandoned: false,
     last_event: 'dispatched', last_ts: '2026-11-25T10:00:00+00:00', ...over
@@ -162,9 +162,19 @@ test('partialTokensOutOnly', () => {
 })
 
 test('plannedModelIsInferred', () => {
-  const planned = task({ worktree: null, branch: null, dispatch: null, last_event: 'planned', model: 'claude-opus-5-5' })
+  const planned = task({ worktree: null, branch: null, dispatch: null, last_event: 'planned', model: 'claude-opus-5-5', model_source: 'planned' })
   const row = first(ledger([planned]), live({ worktrees: [] }))
   assert.deepEqual(row.model, { value: 'claude-opus-5-5', inferred: true })
+  assert.deepEqual(first(ledger([task()]), live()).model, { value: 'claude-sonnet-5-5', inferred: false })
+})
+
+test('launchWithoutModelKeepsPlannedModelInferred', () => {
+  // planned(model=claude-opus-5-5) then dispatched(worktree, dispatch) with no model: the ledger keeps the
+  // planned model with model_source 'planned', so the row must not present it as the model actually used.
+  const t = task({ model: 'claude-opus-5-5', model_source: 'planned' })
+  assert.deepEqual(first(ledger([t]), live()).model, { value: 'claude-opus-5-5', inferred: true })
+  const old = task({ model: 'claude-opus-5-5', model_source: undefined as unknown as null })
+  assert.equal(first(ledger([old]), live()).model.inferred, true, 'a ledger without model_source is never fact')
   assert.deepEqual(first(ledger([task()]), live()).model, { value: 'claude-sonnet-5-5', inferred: false })
 })
 

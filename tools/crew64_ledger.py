@@ -207,7 +207,7 @@ def record(cwd: str, plan: str, task: int, event: str, fields: dict) -> bool:
 
 def _new_task(n: int) -> dict:
     return {
-        "task": n, "title": None, "tier": None, "rung": None, "mode": None, "model": None,
+        "task": n, "title": None, "tier": None, "rung": None, "mode": None, "model": None, "model_source": None,
         "worktree": None, "branch": None, "dispatch": None, "reviews": 0, "escalations": 0,
         "tokens_in": None, "tokens_out": None, "pr": None, "pr_url": None,
         "merged": False, "abandoned": False, "last_event": None, "last_ts": None,
@@ -219,6 +219,13 @@ def _apply(task: dict, ev: dict) -> None:
     for key in SETS.get(kind, ()):
         if key in ev and key in task:
             task[key] = ev[key]
+    # Where the model came from: "planned" (the plan's intent) or "launch" (a
+    # dispatched or native_started event named it). Only "launch" is a fact.
+    if "model" in ev:
+        if kind == "planned":
+            task["model_source"] = "planned"
+        elif kind in ("dispatched", "native_started"):
+            task["model_source"] = "launch"
     if kind == "review":
         task["reviews"] += 1
     elif kind == "escalated":

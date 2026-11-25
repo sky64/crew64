@@ -83,9 +83,11 @@ function buildRow(t: LedgerTask, plan: PlanRow | undefined, live: Live, allowanc
       : trailer
         ? cell(trailer, true)
         : cell(null)
-  // The model is a fact only once a dispatched/native_started event (which sets a worktree) names it.
-  const launched = t.worktree !== null || t.dispatch !== null
-  const model: Cell<string> = launched ? pick(t.model, plan?.model) : cell(t.model ?? plan?.model, true)
+  // The model is a fact only when a dispatched/native_started event named it (model_source 'launch');
+  // a planned model, a plan-row model, or a ledger without model_source is inferred (Codex task 4, cycle 2).
+  const intended = t.model ?? plan?.model ?? null
+  const model: Cell<string> =
+    t.model_source === 'launch' && t.model !== null ? cell(t.model) : intended !== null ? cell(intended, true) : cell(null)
   return {
     task: t.task,
     title: t.title ?? plan?.title ?? `Task ${t.task}`,
@@ -138,7 +140,9 @@ function normalizeTask(raw: unknown): LedgerTask | null {
   if (!isObj(raw) || !Number.isInteger(raw.task)) return null
   return {
     task: raw.task as number, title: str(raw.title), tier: str(raw.tier), rung: num(raw.rung), mode: str(raw.mode),
-    model: str(raw.model), worktree: str(raw.worktree), branch: str(raw.branch), dispatch: str(raw.dispatch),
+    model: str(raw.model),
+    model_source: raw.model_source === 'launch' || raw.model_source === 'planned' ? raw.model_source : null,
+    worktree: str(raw.worktree), branch: str(raw.branch), dispatch: str(raw.dispatch),
     reviews: count(raw.reviews), escalations: count(raw.escalations), tokens_in: num(raw.tokens_in),
     tokens_out: num(raw.tokens_out), pr: num(raw.pr), pr_url: str(raw.pr_url), merged: raw.merged === true,
     abandoned: raw.abandoned === true, last_event: str(raw.last_event) ?? 'planned', last_ts: str(raw.last_ts) ?? ''
