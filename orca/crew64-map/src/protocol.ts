@@ -114,9 +114,17 @@ declare module 'orca' {
     'counter.get': { output: { total: number } }
     /** Adds `by` to the stored total and answers the new total. */
     'counter.add': { input: { by: number }; output: { total: number } }
+    /** The folded map for the repository being viewed. */
+    view: { output: MapView }
+    /** Views another plan of the same repository; changes nothing else. */
+    selectPlan: { input: { plan: string }; output: MapView }
+    /** Views another repository (a `candidates` id from `workspace.list`); changes nothing else. */
+    selectRepo: { input: { id: string }; output: MapView }
   }
   interface PluginPanelEvents {
     /** Posted to every open panel after the total changes. */
     'counter.changed': { total: number }
+    /** Posted to every open panel on each refresh. */
+    view: MapView
   }
 }

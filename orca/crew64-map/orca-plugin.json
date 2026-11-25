@@ -9,7 +9,7 @@
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
-  "main": "src/worker.ts",
+  "main": "src/main.ts",
   "contributes": {
     "panels": [
       {
@@ -18,6 +18,36 @@
         "icon": "blocks",
         "entry": "src/panel.tsx",
         "ui": "components"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.changed"
+      },
+      {
+        "on": "workspace.created"
+      },
+      {
+        "on": "workspace.removed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
+    ],
+    "settings": [
+      {
+        "key": "orcaCli",
+        "title": "Orca CLI path",
+        "description": "Path to the orca CLI shim. Empty uses ~/.config/orca/linux-orca-cli-shim/orca.",
+        "type": "string",
+        "maxLength": 512
+      },
+      {
+        "key": "crew64Root",
+        "title": "crew64 folder",
+        "description": "Folder that holds tools/crew64_ledger.py. Empty uses $CREW64_ROOT, else the newest installed crew64 plugin.",
+        "type": "string",
+        "maxLength": 512
       }
     ]
   },
