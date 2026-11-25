@@ -73,6 +73,9 @@ The owner runs many crew64 workers in parallel and wants to see progress and was
 
 ### Remote workspaces (owner's decision)
 
+**Result (2026-11-25, decision 0010):** a plugin runs on the Orca server it is installed on and sees only that server's workspaces, so the map is installed on each server (the home-office server for its repositories) and every read is local to that worker. The two cases below were the options before the spike.
+
+
 `workspace.list` gives each workspace a `hostId`. A workspace on another host keeps its log, worktrees, git and `gh` on that host, so the worker must not assume it can read local files for it. The first plan task, before anything else is built, is a spike that answers one question on the owner's setup (iMac Orca, home-office environment): **where does a trusted plugin worker run for a remote workspace?**
 
 - If Orca runs the plugin's worker on the workspace's host, the design above holds unchanged there.
