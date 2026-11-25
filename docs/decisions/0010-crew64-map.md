@@ -1,6 +1,25 @@
 # 0010: crew64-map, an Orca panel for the focused repository's plan
 
-Date: 2026-11-25. Status: design approved by the owner on 2026-11-19 (`docs/superpowers/specs/2026-11-19-crew64-map-design.md`); plan `docs/superpowers/plans/2026-11-19-crew64-map.md` approved on 2026-11-25. The rest of this record is written in Task 3 of the plan; this section is Task 1's result.
+Date: 2026-11-25. Status: design approved by the owner on 2026-11-19 (`docs/superpowers/specs/2026-11-19-crew64-map-design.md`); plan `docs/superpowers/plans/2026-11-19-crew64-map.md` approved on 2026-11-25. Full design in the spec; this record keeps what was decided and why.
+
+## Context
+
+The owner runs many crew64 workers in parallel and wants to see progress and waste as numbers. Orca has a plugin system with sidebar panels and trusted Node workers, but its API knows nothing of crew64 plans, rungs or review cycles, and two of the numbers that show waste (review cycles used, escalations) exist only in the orchestrator's head unless it writes them down.
+
+## Decision
+
+1. crew64-map is an Orca plugin (`orca/crew64-map/`, a `worker-panel`): a sidebar panel for the focused repository's current plan, one row per task, show only.
+2. `tools/crew64_ledger.py` is the only writer of its log: one JSON line per orchestrator step, outside the repository, written only when `features.build_map` is on (the switch reserved in decision 0005 now does this). It also writes `repo.json`, the repository's effective settings as `crew64_config.py` resolved them, so `crew64_config.py` stays the single reader of `.claude/crew64.json`.
+3. The panel joins three sources: the log (history and numbers), Orca's live state (working or blocked now), and GitHub (pull request state). An inferred value is marked `~`, an unknown one `—`.
+4. The plugin is installed on each Orca server whose repositories it should map (Remote spike below).
+
+## Consequences
+
+- The orchestrator skill gains one rule (Build map log) and docs/05 one bullet; with the switch off nothing changes for any repository.
+- A step the orchestrator forgets to log shows as inferred or unknown, never as a confident wrong value.
+- The log lives in the user's state directory, so it survives worktree removal and is per machine: a repository's map is on the server where its orchestrator runs.
+- Installing the panel needs the owner's approval of a trusted worker in Orca on each server.
+
 
 ## Remote spike (Task 1, 2026-11-25)
 

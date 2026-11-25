@@ -93,6 +93,7 @@ Adopted 2026-11-17 by owner decision, see [decision 0004](decisions/0004-model-l
 - The owner approves the plan once, together with its owner-items list. The tasks inside it then dispatch without further approval. A single task outside any plan needs no plan; its brief carries tier and rung, the rung defaults to the tier, and its mode comes from the Process ladder table.
 - Every task row in a plan carries: risk tier, complexity rung, the mode (native or delegated), the model that follows from tier and rung, the tool ids from the Tooling table, acceptance criteria, and the owner item it depends on, if any.
 - Every plan has an **Owner items** section: everything the owner must supply (credentials by name, accounts, decisions, content, approvals), each tied to the task it blocks. The orchestrator asks for these at plan approval, not when a worker is already waiting.
+- When `features.build_map` is on, the orchestrator records each step of each planned task with `crew64_ledger.py record` (planned, dispatched or native_started, every review pass, escalations, commits with tokens, the pull request, merged or abandoned). The log lives outside the repository under `$CREW64_STATE_DIR`, `$XDG_STATE_HOME/crew64` or `~/.local/state/crew64`, and the crew64-map Orca panel reads it ([decision 0010](decisions/0010-crew64-map.md)). The orchestrator skill lists the fields per event.
 
 ## Enforcement
 
