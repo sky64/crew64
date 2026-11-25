@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 2,
+  "id": "crew64-map",
+  "name": "crew64 map",
+  "version": "0.1.0",
+  "description": "A sidebar panel and the worker that answers it.",
+  "engines": {
+    "orca": ">=1.4.246"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "crew64-map",
+        "title": "crew64 map",
+        "icon": "blocks",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    }
+  ]
+}
