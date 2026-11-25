@@ -49,7 +49,14 @@ export type MapView = {
 /** Live Orca and GitHub facts for one repository; `prs` is null when GitHub is unavailable. */
 export type Live = {
   worktrees: { path: string; branch: string }[]
-  terminals: { worktreePath: string; status: 'working' | 'blocked' | 'waiting' | 'gone' }[]
+  terminals: {
+    worktreePath: string
+    status: 'working' | 'blocked' | 'waiting' | 'gone'
+    /** Identifiers Orca knows the terminal by (handle, pty id, `tabId:leafId`, leaf id); an agent event joins on them. */
+    ids?: string[]
+    /** True when a live supervised worker runs in the worktree, false for a plain shell, absent when unknown. */
+    agent?: boolean
+  }[]
   /** Worktree paths with an Orca `needs-input` escalation. */
   needsInput: string[]
   prs: { number: number; headRefName: string; state: 'open' | 'merged' | 'closed'; url: string }[] | null
@@ -114,6 +121,12 @@ declare module 'orca' {
     'counter.get': { output: { total: number } }
     /** Adds `by` to the stored total and answers the new total. */
     'counter.add': { input: { by: number }; output: { total: number } }
+    /**
+     * The panel's visibility lease. A mounted panel calls it on setup and every 30 s; the worker
+     * treats the panel as open while the newest lease is under 90 s old. While none is, it runs
+     * no timers and polls neither Orca nor GitHub; the next lease refreshes at once.
+     */
+    'view.lease': { output: { ok: true } }
     /** The folded map for the repository being viewed. */
     view: { output: MapView }
     /** Views another plan of the same repository; changes nothing else. */

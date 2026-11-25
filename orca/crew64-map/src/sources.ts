@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import type { LedgerShow, Live } from './protocol'
 
 const TIMEOUT_MS = 10_000
@@ -20,6 +20,8 @@ export type FsLike = {
   readdir(path: string): Promise<string[]>
   readFile(path: string): Promise<string>
   exists(path: string): Promise<boolean>
+  realpath(path: string): Promise<string>
+  isSymlink(path: string): Promise<boolean>
 }
 export type SourceSettings = { orcaCli?: string; crew64Root?: string }
 
@@ -47,7 +49,9 @@ export const realExec: ExecFn = (cmd, args, opts) =>
 export const realFs: FsLike = {
   readdir,
   readFile: (p) => readFile(p, 'utf8'),
-  exists: (p) => stat(p).then(() => true, () => false)
+  exists: (p) => stat(p).then(() => true, () => false),
+  realpath,
+  isSymlink: (p) => lstat(p).then((s) => s.isSymbolicLink())
 }
 
 export type LocalSourceConfig = {
@@ -85,6 +89,7 @@ type PrCache = { at: number; prs: Live['prs'] }
 export class LocalSource implements Source {
   private readonly noteSet = new Set<string>()
   private readonly prCache = new Map<string, PrCache>()
+  private readonly prInflight = new Map<string, Promise<Live['prs']>>()
   private readonly baseCache = new Map<string, string>()
 
   constructor(private readonly cfg: LocalSourceConfig) {}
@@ -130,19 +135,50 @@ export class LocalSource implements Source {
     }
   }
 
+  /**
+   * Reads a plan only through real files: no symlink component below the repository, and the real
+   * path of the file inside the real path of the plans directory, inside the real repository.
+   */
   async planFile(repoRoot: string, plan?: string): Promise<string | null> {
+    const dir = join(repoRoot, PLANS_DIR)
     try {
+      if (!(await this.plainPath(repoRoot, PLANS_DIR.split('/')))) return null
+      let names: string[]
       if (plan !== undefined) {
         const target = resolve(repoRoot, plan)
-        const inside = target.startsWith(resolve(repoRoot, PLANS_DIR) + '/') && target.endsWith('.md')
-        return inside ? await this.cfg.fs.readFile(target) : null
+        if (!target.startsWith(resolve(dir) + '/') || !target.endsWith('.md')) return null
+        names = [target.slice(resolve(dir).length + 1)]
+      } else {
+        names = (await this.cfg.fs.readdir(dir)).filter((f) => f.endsWith('.md')).sort().reverse()
       }
-      const dir = join(repoRoot, PLANS_DIR)
-      const newest = (await this.cfg.fs.readdir(dir)).filter((f) => f.endsWith('.md')).sort().pop()
-      return newest === undefined ? null : await this.cfg.fs.readFile(join(dir, newest))
+      for (const name of names) {
+        const text = await this.readPlan(repoRoot, dir, name)
+        if (text !== null) return text
+      }
+      return null
     } catch {
       return null
     }
+  }
+
+  /** True when every component of `parts` below `base` exists as a real directory or file, not a symlink. */
+  private async plainPath(base: string, parts: string[]): Promise<boolean> {
+    let at = base
+    for (const part of parts) {
+      at = join(at, part)
+      if (await this.cfg.fs.isSymlink(at)) return false
+    }
+    return true
+  }
+
+  private async readPlan(repoRoot: string, dir: string, name: string): Promise<string | null> {
+    if (!(await this.plainPath(dir, name.split('/')))) return null
+    const file = join(dir, name)
+    const [realRepo, realDir, realFile] = await Promise.all([
+      this.cfg.fs.realpath(repoRoot), this.cfg.fs.realpath(dir), this.cfg.fs.realpath(file)
+    ])
+    const inside = realDir.startsWith(realRepo + '/') && realFile.startsWith(realDir + '/')
+    return inside ? this.cfg.fs.readFile(file) : null
   }
 
   async live(repoRoot: string, taskPaths: string[], branches: { task: number; branch: string }[] = []): Promise<Live> {
@@ -209,30 +245,69 @@ export class LocalSource implements Source {
     const own = all.filter((w) => (repoId !== null ? w.repoId === repoId : taskPaths.includes(String(w.path))) || w.path === repoRoot)
     const paths = new Set(own.map((w) => String(w.path)))
     live.worktrees = own.map((w) => ({ path: String(w.path), branch: String(w.branch ?? '').replace(/^refs\/heads\//, '') }))
+    // Supervised workers: the only source that tells an agent from a plain shell, and the join
+    // for escalations (their messages carry dispatch and task ids, not terminal handles).
+    const workers = await this.orcaJson(cli, ['orchestration', 'worker-list', '--limit', '100'], 'workers')
+    const liveWorkers = (workers ?? []).filter((w) => w.liveness === 'live')
+    const workerPath = (w: Record<string, unknown>): string | null => {
+      const workspace = str(w.workspace)
+      const at = workspace?.indexOf('::') ?? -1
+      return workspace !== null && at >= 0 ? workspace.slice(at + 2) : null
+    }
+    const agentPaths = new Set(liveWorkers.flatMap((w) => workerPath(w) ?? []))
     const terminals = await this.orcaJson(cli, ['terminal', 'list'], 'terminals')
     if (terminals === null) return
-    const mine = terminals.filter((t) => paths.has(String(t.worktreePath)))
-    live.terminals = mine.map((t) => ({
-      worktreePath: String(t.worktreePath),
-      status: t.connected === false || t.orphaned === true ? 'gone' : 'waiting'
-    }))
+    live.terminals = terminals
+      .filter((t) => paths.has(String(t.worktreePath)))
+      .map((t) => {
+        const ids = [str(t.handle), str(t.ptyId), t.tabId && t.leafId ? `${String(t.tabId)}:${String(t.leafId)}` : null, str(t.leafId)]
+        return {
+          worktreePath: String(t.worktreePath),
+          status: t.connected === false || t.orphaned === true ? ('gone' as const) : ('waiting' as const),
+          ids: ids.filter((i): i is string => i !== null),
+          agent: agentPaths.has(String(t.worktreePath))
+        }
+      })
+    if (workers === null) {
+      this.note('escalations are not mapped: the orca worker listing is unavailable')
+      return
+    }
     const inbox = await this.orcaJson(cli, ['orchestration', 'inbox', '--limit', '100'], 'messages')
     if (inbox === null) return
-    const byHandle = new Map(mine.map((t) => [String(t.handle), String(t.worktreePath)]))
-    const waiting = inbox.filter((m) => m.type === 'escalation' && m.handled === false)
-    const where = waiting.map((m) => byHandle.get(String(m.from)) ?? byHandle.get(String(asRecord(m.payload).terminal)))
-    live.needsInput = [...new Set(where.filter((p): p is string => p !== undefined))]
+    const found = new Set<string>()
+    for (const m of inbox.filter((x) => x.type === 'escalation' && x.handled === false)) {
+      const payload = asRecord(m.payload)
+      const dispatch = str(payload.dispatchId)
+      const taskId = str(payload.taskId)
+      const worker = liveWorkers.find((w) => (dispatch !== null && w.dispatchId === dispatch) || (dispatch === null && taskId !== null && w.taskId === taskId))
+      const path = worker ? workerPath(worker) : null
+      if (path !== null && paths.has(path)) found.add(path)
+      else if (path === null) this.note('an escalation could not be mapped to a worktree and is not shown')
+    }
+    live.needsInput = [...found]
   }
 
   // --- GitHub ---------------------------------------------------------------------------
 
-  private async pullRequests(repoRoot: string): Promise<Live['prs']> {
+  private pullRequests(repoRoot: string): Promise<Live['prs']> {
+    const pending = this.prInflight.get(repoRoot)
+    if (pending) return pending
     const cached = this.prCache.get(repoRoot)
-    if (cached && this.cfg.now() - cached.at < GH_INTERVAL_MS) return cached.prs
-    let prs: Live['prs'] = null
+    if (cached && this.cfg.now() - cached.at < GH_INTERVAL_MS) return Promise.resolve(cached.prs)
+    // The slot is taken before gh runs, so a second caller shares this fetch instead of starting one.
+    const started = this.cfg.now()
+    const fetch = this.fetchPullRequests(repoRoot).then((prs) => {
+      this.prCache.set(repoRoot, { at: started, prs })
+      return prs
+    }).finally(() => this.prInflight.delete(repoRoot))
+    this.prInflight.set(repoRoot, fetch)
+    return fetch
+  }
+
+  private async fetchPullRequests(repoRoot: string): Promise<Live['prs']> {
     try {
       const out = await this.cfg.exec('gh', ['pr', 'list', '--state', 'all', '--json', 'number,headRefName,state,url', '--limit', '200'], { cwd: repoRoot })
-      prs = asList(JSON.parse(out)).flatMap((p) => {
+      return asList(JSON.parse(out)).flatMap((p) => {
         const state = String(p.state).toLowerCase()
         const url = str(p.url)
         const head = str(p.headRefName)
@@ -242,9 +317,8 @@ export class LocalSource implements Source {
     } catch (error) {
       const missing = (error as { code?: unknown }).code === 'ENOENT'
       this.note(missing ? 'GitHub pull request state is unavailable: the gh CLI is not installed' : 'GitHub pull request state is unavailable: gh failed (is it signed in?)')
+      return null
     }
-    this.prCache.set(repoRoot, { at: this.cfg.now(), prs })
-    return prs
   }
 
   // --- commit trailers ------------------------------------------------------------------

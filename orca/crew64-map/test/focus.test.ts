@@ -23,8 +23,19 @@ test('focusByWorkspaceId', () => {
   const list = [ws('a', '/r1', 'main', 'main'), ws('b', '/r2', 'main', 'main')]
   const r = resolveFocus({ branch: 'main', displayName: 'main', workspaceId: 'b' }, list)
   assert.equal(r.kind === 'one' && r.workspace.id, 'b')
-  // An id Orca does not list falls back to the name match.
-  assert.equal(resolveFocus({ branch: 'main', displayName: 'main', workspaceId: 'zz' }, list).kind, 'ambiguous')
+})
+
+test('unlistedWorkspaceIdNeverFallsBackToAnotherWorkspace', () => {
+  const r = resolveFocus({ workspaceId: 'missing-A', branch: 'main', displayName: 'repo-A' }, [ws('B', '/B', 'main', 'repo-B')])
+  assert.equal(r.kind, 'none')
+  // Even a perfect branch and name match is not used when the host named a different id.
+  assert.equal(resolveFocus({ workspaceId: 'zz', branch: 'main', displayName: 'main' }, [ws('a', '/r1', 'main', 'main')]).kind, 'none')
+})
+
+test('branchOnlyMatchIsAPickerNotASelection', () => {
+  const r = resolveFocus({ branch: 'main', displayName: 'repo-A' }, [ws('B', '/B', 'main', 'repo-B')])
+  assert.equal(r.kind, 'ambiguous')
+  assert.deepEqual(r.kind === 'ambiguous' && r.candidates.map((c) => c.id), ['B'])
 })
 
 test('noContextOrNoMatchIsNone', () => {

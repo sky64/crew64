@@ -20,8 +20,12 @@ declare module 'node:fs/promises' {
   export function mkdtemp(prefix: string): Promise<string>
   export function writeFile(path: string, data: string): Promise<void>
   export function appendFile(path: string, data: string): Promise<void>
-  export function mkdir(path: string): Promise<string | undefined>
+  export function mkdir(path: string, options?: { recursive: boolean }): Promise<string | undefined>
   export function stat(path: string): Promise<{ mtimeMs: number; isFile(): boolean }>
+  export function lstat(path: string): Promise<{ isSymbolicLink(): boolean }>
+  export function realpath(path: string): Promise<string>
+  export function symlink(target: string, path: string): Promise<void>
+  export function rm(path: string, options: { recursive: boolean }): Promise<void>
 }
 declare module 'node:os' {
   export function homedir(): string

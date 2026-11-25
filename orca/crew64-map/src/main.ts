@@ -11,7 +11,7 @@ import type { LedgerShow, Live, MapView } from './protocol'
 import { LocalSource, realConfig, type Source } from './sources'
 
 const SNAPSHOT_MS = 60_000
-const OPEN_WINDOW_MS = 5 * 60_000
+const LEASE_MS = 90_000
 const DEFAULT_DEBOUNCE_MS = 150
 const PLANS_DIR = 'docs/superpowers/plans'
 const REPO_KEY = 'repoId'
@@ -59,21 +59,34 @@ export default function activate(orca: OrcaWorkerApi): void {
   activateWith(orca, { source: new LocalSource(realConfig(settings)), watch: realWatch })
 }
 
+type AgentState = { state: 'working' | 'blocked' | 'waiting'; workspaceId: string; at: number }
+
 export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
   const { source } = deps
   const debounceMs = deps.debounceMs ?? DEFAULT_DEBOUNCE_MS
+  const interval = deps.intervalMs ?? SNAPSHOT_MS
   const rootCache = new Map<string, string | null>()
-  const agentStates = new Map<string, 'working' | 'blocked' | 'waiting'>()
-  let snapshot: { root: string; at: number; live: Live } | null = null
-  let lastViewAt = 0
+  // Agent status by the terminal identity the event carried (terminalId and paneKey).
+  const agentStates = new Map<string, AgentState>()
+  let snapshot: { key: string; at: number; live: Live } | null = null
+  let leaseAt = 0
+  let lapseTimer: ReturnType<typeof setTimeout> | null = null
+  let poll: ReturnType<typeof setInterval> | null = null
   let watchKey = ''
   let watchers: Watcher[] = []
   let timer: ReturnType<typeof setTimeout> | null = null
   let running: Promise<void> | null = null
   let dirty = false
   let stopped = false
+  let chain: Promise<unknown> = Promise.resolve()
 
-  const isOpen = () => Date.now() - lastViewAt < OPEN_WINDOW_MS
+  const isOpen = () => Date.now() - leaseAt < LEASE_MS
+  /** One build at a time, whether a request or a refresh asked for it. */
+  const exclusive = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const result = chain.then(fn, fn)
+    chain = result.catch(() => undefined)
+    return result
+  }
   const rootOf = async (path: string): Promise<string | null> => {
     if (!rootCache.has(path)) rootCache.set(path, await source.repoRoot(path))
     return rootCache.get(path) ?? null
@@ -88,38 +101,64 @@ export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
       | { branch: string; displayName: string; workspaceId?: string }
       | null
     const focus = resolveFocus(ctx, workspaces)
-    const stored = text(await orca.storage.get(REPO_KEY))
     const pick = async (w: Workspace): Promise<Chosen> => {
       const root = await rootOf(w.path)
       return root ? { root, workspaces } : { view: emptyView('error', [`${w.name} is not in a git repository`]) }
     }
     if (focus.kind === 'one') return pick(focus.workspace)
-    const pool = focus.kind === 'ambiguous' ? focus.candidates : workspaces
-    const chosen = stored ? pool.find((w) => w.id === stored) : undefined
+    if (focus.kind === 'none') {
+      const note = !ctx
+        ? 'No workspace is focused.'
+        : ctx.workspaceId
+          ? "The focused workspace is not in Orca's workspace list."
+          : 'The focused workspace matches no listed workspace.'
+      return { view: emptyView('error', [note]) }
+    }
+    const stored = text(await orca.storage.get(REPO_KEY))
+    const chosen = stored ? focus.candidates.find((w) => w.id === stored) : undefined
     if (chosen) return pick(chosen)
-    if (focus.kind === 'none') return { view: emptyView('error', ['No workspace is focused.']) }
     const roots = new Map<string, Workspace>()
     for (const c of focus.candidates) {
       const root = await rootOf(c.path)
       if (root && !roots.has(root)) roots.set(root, c)
     }
-    if (roots.size === 1) return { root: [...roots.keys()][0], workspaces }
+    // Only an exact branch-and-name match may be taken for granted; anything less is the picker's.
+    if (focus.exact && roots.size === 1) return { root: [...roots.keys()][0], workspaces }
     const candidates = [...roots].map(([root, w]) => ({ id: w.id, name: basename(root) }))
     return { view: emptyView('ambiguous', [], { candidates }) }
+  }
+
+  const hasId = (ids: string[] | undefined, key: string) => ids?.includes(key) === true
+
+  /** Forgets agent states whose terminal a fresh snapshot no longer lists. */
+  function pruneStates(live: Live, workspaces: Workspace[]): void {
+    const paths = new Set(live.worktrees.map((w) => w.path))
+    for (const [key, entry] of agentStates) {
+      const w = workspaces.find((x) => x.id === entry.workspaceId)
+      if (!w || !paths.has(w.path)) continue
+      if (!live.terminals.some((t) => t.worktreePath === w.path && hasId(t.ids, key))) agentStates.delete(key)
+    }
   }
 
   async function liveFor(root: string, ledger: LedgerShow, workspaces: Workspace[], force: boolean): Promise<Live> {
     const tasks = ledger.plans[0]?.tasks ?? []
     const paths = tasks.flatMap((t) => (t.worktree ? [t.worktree] : []))
     const branches = tasks.flatMap((t) => (t.branch && t.tokens_in === null && t.tokens_out === null ? [{ task: t.task, branch: t.branch }] : []))
-    const fresh = snapshot && snapshot.root === root && Date.now() - snapshot.at < SNAPSHOT_MS
-    if (!fresh || force) snapshot = { root, at: Date.now(), live: await source.live(root, paths, branches) }
-    const live = snapshot!.live
-    // Live agent events fill in between snapshots.
-    const terminals = live.terminals.map((t) => {
+    // What the snapshot is about: this repository, this plan and its task paths and branches.
+    const key = JSON.stringify([root, ledger.plans[0]?.plan ?? null, paths, branches])
+    if (force || !snapshot || snapshot.key !== key || Date.now() - snapshot.at >= SNAPSHOT_MS) {
+      const live = await source.live(root, paths, branches)
+      snapshot = { key, at: Date.now(), live }
+      pruneStates(live, workspaces)
+    }
+    const live = snapshot.live
+    // Live agent events fill in between snapshots, joined to a listed terminal by identity.
+    const terminals = live.terminals.flatMap((t) => {
       const w = workspaces.find((x) => x.path === t.worktreePath)
-      const state = w ? agentStates.get(w.id) : undefined
-      return state && t.status !== 'gone' ? { ...t, status: state } : t
+      const matches = [...agentStates].filter(([k, e]) => w !== undefined && e.workspaceId === w.id && hasId(t.ids, k)).map(([, e]) => e)
+      const latest = matches.sort((x, y) => y.at - x.at)[0]
+      if (t.agent === false && !latest) return []
+      return [latest && t.status !== 'gone' ? { ...t, status: latest.state } : t]
     })
     return { ...live, terminals }
   }
@@ -145,7 +184,7 @@ export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
   async function watchFor(root: string): Promise<void> {
     const dirs = [await source.logDir(root), join(root, PLANS_DIR)].filter((d): d is string => d !== null)
     const key = dirs.join('\n')
-    if (key === watchKey || stopped) return
+    if (key === watchKey || stopped || !isOpen()) return
     watchKey = key
     for (const w of watchers) w.close()
     watchers = []
@@ -168,8 +207,8 @@ export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
       try {
         do {
           dirty = false
-          orca.panels.post('view', await build(force))
-        } while (dirty && !stopped)
+          orca.panels.post('view', await exclusive(() => build(force)))
+        } while (dirty && !stopped && isOpen())
       } catch (error) {
         orca.log(`refresh failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -186,23 +225,36 @@ export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
     }, debounceMs)
   }
 
-  function onWorkspaceEvent(): void {
-    snapshot = null
-    rootCache.clear()
-    schedule()
+  function lapse(): void {
+    // No lease left: no timers, no polling; watchers are reopened by the next refresh.
+    if (poll !== null) clearInterval(poll)
+    poll = null
+    if (timer !== null) clearTimeout(timer)
+    timer = null
+    for (const w of watchers) w.close()
+    watchers = []
+    watchKey = ''
   }
 
-  // A panel that has not asked for a view lately is closed: nothing polls for it.
-  const opened = (): boolean => {
-    const wasClosed = !isOpen()
-    lastViewAt = Date.now()
-    return wasClosed
+  function renewLease(): void {
+    const wasOpen = isOpen()
+    leaseAt = Date.now()
+    if (lapseTimer !== null) clearTimeout(lapseTimer)
+    lapseTimer = setTimeout(lapse, LEASE_MS)
+    ;(lapseTimer as unknown as { unref?: () => void }).unref?.()
+    if (wasOpen) return
+    if (interval > 0 && poll === null) {
+      poll = setInterval(() => { snapshot = null; schedule() }, interval)
+      ;(poll as unknown as { unref?: () => void }).unref?.()
+    }
+    void refresh(true)
   }
 
-  async function answer(): Promise<MapView> {
-    return build(opened())
-  }
-
+  orca.panels.handle('view.lease', async () => {
+    renewLease()
+    return { ok: true as const }
+  })
+  const answer = () => exclusive(() => build(!isOpen()))
   orca.panels.handle('view', answer)
   orca.panels.handle('selectPlan', async ({ plan }) => {
     await orca.storage.set(PLAN_KEY, plan)
@@ -213,21 +265,24 @@ export function activateWith(orca: OrcaWorkerApi, deps: Deps): void {
     return answer()
   })
   for (const event of ['workspace.changed', 'workspace.created', 'workspace.removed'] as const) {
-    orca.events.on(event, onWorkspaceEvent)
+    orca.events.on(event, () => {
+      snapshot = null
+      rootCache.clear()
+      schedule()
+    })
   }
   orca.events.on('agent.status.changed', (e) => {
     if (e.workspaceId === null) return
-    agentStates.set(e.workspaceId, e.state === 'done' ? 'waiting' : e.state)
+    const entry: AgentState = { state: e.state === 'done' ? 'waiting' : e.state, workspaceId: e.workspaceId, at: e.receivedAt }
+    for (const key of [e.terminalId, e.paneKey]) if (key) agentStates.set(key, entry)
     schedule()
   })
 
-  const interval = deps.intervalMs ?? SNAPSHOT_MS
-  const poll = interval > 0 ? setInterval(() => { snapshot = null; schedule() }, interval) : null
-  ;(poll as unknown as { unref?: () => void } | null)?.unref?.()
   active = {
     stop() {
       stopped = true
       if (timer !== null) clearTimeout(timer)
+      if (lapseTimer !== null) clearTimeout(lapseTimer)
       if (poll !== null) clearInterval(poll)
       for (const w of watchers) w.close()
       watchers = []

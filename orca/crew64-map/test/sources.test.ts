@@ -1,4 +1,5 @@
 import { assert, test } from 'orca/testing'
+import { join } from 'node:path'
 import { LocalSource, type ExecFn } from '../src/sources'
 
 type Call = { cmd: string; args: string[]; cwd?: string }
@@ -30,7 +31,9 @@ function harness(routes: Routes, files: Record<string, string> = {}, opts: { set
       if (!(p in files)) throw new Error('ENOENT')
       return files[p]
     },
-    exists: async (p: string) => p in files || Object.keys(files).some((f) => f.startsWith(p + '/'))
+    exists: async (p: string) => p in files || Object.keys(files).some((f) => f.startsWith(p + '/')),
+    realpath: async (p: string) => p,
+    isSymlink: async () => false
   }
   const source = new LocalSource({
     exec, fs, home: '/home/u', env: opts.env ?? {}, now: () => now,
@@ -71,15 +74,15 @@ test('missingCrew64ToolsAddsNoteAndNoLedger', async () => {
 })
 
 test('orcaCliFromSetting', async () => {
-  const routes = { '/x/orca worktree list': '{"result":{"worktrees":[]}}', '/x/orca terminal list': '{"result":{"terminals":[]}}', '/x/orca orchestration inbox': '{"result":{"messages":[]}}', gh: '[]' }
+  const routes = { '/x/orca worktree list': '{"result":{"worktrees":[]}}', '/x/orca terminal list': '{"result":{"terminals":[]}}', '/x/orca orchestration inbox': '{"result":{"messages":[]}}', '/x/orca orchestration worker-list': '{"result":{"workers":[]}}', gh: '[]' }
   const a = harness(routes, { '/x/orca': '' }, { settings: { orcaCli: '/x/orca' } })
   await a.source.live(REPO, [])
   assert.ok(a.calls.some((c) => c.cmd === '/x/orca'))
   // XDG_CONFIG_HOME default, then ~/.config.
-  const xdg = harness({ '/xdg/orca/linux-orca-cli-shim/orca': '{"result":{"worktrees":[],"terminals":[],"messages":[]}}', gh: '[]' }, { '/xdg/orca/linux-orca-cli-shim/orca': '' }, { env: { XDG_CONFIG_HOME: '/xdg' } })
+  const xdg = harness({ '/xdg/orca/linux-orca-cli-shim/orca': '{"result":{"worktrees":[],"terminals":[],"messages":[],"workers":[]}}', gh: '[]' }, { '/xdg/orca/linux-orca-cli-shim/orca': '' }, { env: { XDG_CONFIG_HOME: '/xdg' } })
   await xdg.source.live(REPO, [])
   assert.ok(xdg.calls.some((c) => c.cmd === '/xdg/orca/linux-orca-cli-shim/orca'))
-  const home = harness({ [SHIM]: '{"result":{"worktrees":[],"terminals":[],"messages":[]}}', gh: '[]' }, { [SHIM]: '' })
+  const home = harness({ [SHIM]: '{"result":{"worktrees":[],"terminals":[],"messages":[],"workers":[]}}', gh: '[]' }, { [SHIM]: '' })
   await home.source.live(REPO, [])
   assert.ok(home.calls.some((c) => c.cmd === SHIM))
 })
@@ -98,22 +101,29 @@ const cli = (extra: Routes = {}): Routes => ({
   [`${SHIM} worktree list`]: JSON.stringify({
     result: { worktrees: [
       { id: 'r::/home/u/repo', path: REPO, repoId: 'r', branch: 'refs/heads/main' },
-      { id: 'r::a b\'c', path: "a b'c", repoId: 'r', branch: 'refs/heads/sky64/t1' },
+      { id: "r::a b'c", path: "a b'c", repoId: 'r', branch: 'refs/heads/sky64/t1' },
       { id: 'q::/other', path: '/other', repoId: 'q', branch: 'refs/heads/other' }
     ] }
   }),
   [`${SHIM} terminal list`]: JSON.stringify({
     result: { terminals: [
-      { handle: 'term_1', worktreePath: "a b'c", connected: true, orphaned: false },
+      { handle: 'term_1', ptyId: 'pty1', tabId: 'tab1', leafId: 'leaf1', worktreePath: "a b'c", connected: true, orphaned: false },
       { handle: 'term_2', worktreePath: '/other', connected: true, orphaned: false },
-      { handle: 'term_3', worktreePath: REPO, connected: false, orphaned: true }
+      { handle: 'term_3', worktreePath: REPO, connected: false, orphaned: true },
+      { handle: 'term_4', tabId: 'tab1', leafId: 'leaf2', worktreePath: "a b'c", connected: true, orphaned: false }
+    ] }
+  }),
+  [`${SHIM} orchestration worker-list`]: JSON.stringify({
+    result: { workers: [
+      { dispatchId: 'ctx_1', taskId: 'task_1', liveness: 'live', workspace: "r::a b'c" },
+      { dispatchId: 'ctx_old', taskId: 'task_0', liveness: 'exited', workspace: `r::${REPO}` }
     ] }
   }),
   [`${SHIM} orchestration inbox`]: JSON.stringify({
     result: { messages: [
-      { type: 'escalation', handled: false, from: 'term_1', subject: 'needs input' },
-      { type: 'escalation', handled: true, from: 'term_3' },
-      { type: 'worker_done', handled: false, from: 'term_1' }
+      { type: 'escalation', handled: false, from: 'structworker_x', payload: { dispatchId: 'ctx_1', taskId: 'task_1' } },
+      { type: 'escalation', handled: true, from: 'structworker_y', payload: { dispatchId: 'ctx_old' } },
+      { type: 'worker_done', handled: false, from: 'structworker_x', payload: { dispatchId: 'ctx_1' } }
     ] }
   }),
   gh: '[]',
@@ -126,8 +136,9 @@ test('pathsWithSpacesAndQuotes', async () => {
   assert.deepEqual(live.worktrees.map((w) => w.path), [REPO, "a b'c"])
   assert.deepEqual(live.worktrees[1].branch, 'sky64/t1')
   assert.deepEqual(live.terminals, [
-    { worktreePath: "a b'c", status: 'waiting' },
-    { worktreePath: REPO, status: 'gone' }
+    { worktreePath: "a b'c", status: 'waiting', ids: ['term_1', 'pty1', 'tab1:leaf1', 'leaf1'], agent: true },
+    { worktreePath: REPO, status: 'gone', ids: ['term_3'], agent: false },
+    { worktreePath: "a b'c", status: 'waiting', ids: ['term_4', 'tab1:leaf2', 'leaf2'], agent: true }
   ])
   assert.deepEqual(live.needsInput, ["a b'c"])
 })
@@ -137,7 +148,7 @@ test('noShellStrings', async () => {
   await h.source.ledger(REPO)
   await h.source.live(REPO, ["a b'c"], [{ task: 1, branch: 'sky64/t1' }])
   await h.source.logDir(REPO)
-  assert.ok(h.calls.length >= 6)
+  assert.ok(h.calls.length >= 7)
   for (const c of h.calls) {
     assert.ok(Array.isArray(c.args), 'args is an array')
     assert.ok(c.args.every((a) => typeof a === 'string'))
@@ -223,4 +234,102 @@ test('planFileReadsNamedOrNewestPlan', async () => {
   assert.equal(await h.source.planFile(REPO, 'docs/superpowers/plans/2026-01-01-a.md'), 'A')
   // A plan path that leaves the repository is refused.
   assert.equal(await h.source.planFile(REPO, '../../etc/passwd'), null)
+})
+
+test('shellWithoutLiveWorkerIsNotAgentLiveness', async () => {
+  // Only a worktree with a live supervised worker holds an agent terminal; the main checkout's shell does not.
+  const h = harness(cli(), { [SHIM]: '' })
+  const live = await h.source.live(REPO, [])
+  assert.ok(live.terminals.filter((t) => t.worktreePath === REPO).every((t) => t.agent === false))
+})
+
+test('sessionAddressedEscalationJoinsWorkerListByDispatchId', async () => {
+  const h = harness(cli({
+    [`${SHIM} orchestration inbox`]: JSON.stringify({ result: { messages: [
+      { type: 'escalation', handled: false, from: 'orca_session_id:session_1', payload: { dispatchId: 'ctx_1', taskId: 'task_1' } }
+    ] } })
+  }), { [SHIM]: '' })
+  assert.deepEqual((await h.source.live(REPO, ["a b'c"])).needsInput, ["a b'c"])
+  const byTask = harness(cli({
+    [`${SHIM} orchestration inbox`]: JSON.stringify({ result: { messages: [
+      { type: 'escalation', handled: false, from: 'orca_session_id:s', payload: { taskId: 'task_1' } }
+    ] } })
+  }), { [SHIM]: '' })
+  assert.deepEqual((await byTask.source.live(REPO, ["a b'c"])).needsInput, ["a b'c"])
+})
+
+test('unmappableEscalationIsNeverGuessed', async () => {
+  const h = harness(cli({
+    [`${SHIM} orchestration inbox`]: JSON.stringify({ result: { messages: [
+      { type: 'escalation', handled: false, from: 'orca_session_id:s', payload: { dispatchId: 'ctx_unknown' } },
+      { type: 'escalation', handled: false, from: 'term_1' }
+    ] } })
+  }), { [SHIM]: '' })
+  const live = await h.source.live(REPO, ["a b'c"])
+  assert.deepEqual(live.needsInput, [])
+  assert.ok(h.source.notes().some((n) => /escalation/i.test(n)))
+})
+
+test('workerListFailureLeavesNeedsInputEmptyWithNote', async () => {
+  const h = harness(cli({ [`${SHIM} orchestration worker-list`]: new Error('boom') }), { [SHIM]: '' })
+  const live = await h.source.live(REPO, ["a b'c"])
+  assert.deepEqual(live.needsInput, [])
+  assert.ok(h.source.notes().some((n) => /escalations are not mapped/i.test(n)))
+  assert.ok(live.terminals.every((t) => t.agent === false))
+})
+
+test('simultaneousReadsCoalesceGh', async () => {
+  let calls = 0
+  const exec: ExecFn = async (cmd) => {
+    if (cmd !== 'gh') throw new Error('unexpected')
+    calls++
+    await new Promise((r) => setTimeout(r, 10))
+    return '[]'
+  }
+  const fs = { exists: async () => false, readdir: async () => [], readFile: async () => '', realpath: async (p: string) => p, isSymlink: async () => false }
+  const s = new LocalSource({ exec, fs, home: '/h', env: {}, now: () => 1_000_000, settings: async () => ({}) })
+  await Promise.all([s.live(REPO, []), s.live(REPO, [])])
+  assert.equal(calls, 1)
+})
+
+async function scratchRepo() {
+  const { mkdtemp, mkdir, writeFile, symlink } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const dir = await mkdtemp(join(tmpdir(), 'crew64-plans-'))
+  await mkdir(join(dir, 'repo/docs/superpowers/plans'), { recursive: true })
+  await writeFile(join(dir, 'outside.md'), 'outside repository')
+  return { dir, repo: join(dir, 'repo'), plans: join(dir, 'repo/docs/superpowers/plans'), writeFile, symlink, mkdir }
+}
+const realSource = async () => {
+  const { realFs } = await import('../src/sources')
+  return new LocalSource({ exec: async () => '', fs: realFs, home: '/h', env: {}, now: Date.now, settings: async () => ({}) })
+}
+
+test('planSymlinkFileIsRefused', async () => {
+  const r = await scratchRepo()
+  await r.symlink(join(r.dir, 'outside.md'), join(r.plans, 'link.md'))
+  await r.writeFile(join(r.plans, '2026-01-01-real.md'), 'real')
+  const s = await realSource()
+  assert.equal(await s.planFile(r.repo, 'docs/superpowers/plans/link.md'), null)
+  assert.equal(await s.planFile(r.repo, 'docs/superpowers/plans/2026-01-01-real.md'), 'real')
+})
+
+test('planSymlinkedDirectoryIsRefused', async () => {
+  const r = await scratchRepo()
+  const { rm } = await import('node:fs/promises')
+  await rm(r.plans, { recursive: true })
+  await r.mkdir(join(r.dir, 'elsewhere'), { recursive: true })
+  await r.writeFile(join(r.dir, 'elsewhere/2026-01-01-x.md'), 'elsewhere')
+  await r.symlink(join(r.dir, 'elsewhere'), r.plans)
+  const s = await realSource()
+  assert.equal(await s.planFile(r.repo, 'docs/superpowers/plans/2026-01-01-x.md'), null)
+  assert.equal(await s.planFile(r.repo), null)
+})
+
+test('newestPlanSkipsSymlinksAndReadsNextRealFile', async () => {
+  const r = await scratchRepo()
+  await r.writeFile(join(r.plans, '2026-01-01-a.md'), 'A')
+  await r.symlink(join(r.dir, 'outside.md'), join(r.plans, '2026-09-09-z.md'))
+  const s = await realSource()
+  assert.equal(await s.planFile(r.repo), 'A')
 })
