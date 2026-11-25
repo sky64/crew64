@@ -26,28 +26,28 @@ function emptyTask(n: number, title: string): LedgerTask {
 }
 
 function matchPr(t: LedgerTask, branch: string | null, live: Live): Fact<PrInfo> | null {
-  const prs = live.prs ?? []
+  const logged = t.pr !== null && t.pr_url ? { number: t.pr, url: t.pr_url } : null
+  // GitHub unavailable: keep the logged link, but its state is unknown and drives nothing.
+  if (live.prs === null) return logged ? { value: { ...logged, state: 'unknown' }, inferred: false } : null
+  const prs = live.prs
   const byNumber = t.pr === null ? undefined : prs.find((p) => p.number === t.pr)
   if (byNumber) return { value: { number: byNumber.number, url: byNumber.url, state: byNumber.state }, inferred: false }
   const byBranch = branch ? prs.find((p) => p.headRefName === branch) : undefined
-  if (byBranch) {
-    const state = byBranch.state
-    // A log that names a different PR number is not overridden by a branch guess.
-    if (t.pr !== null && t.pr !== byBranch.number) return null
-    return { value: { number: byBranch.number, url: byBranch.url, state }, inferred: t.pr === null }
+  // A log that names a different PR number is not overridden by a branch guess.
+  if (byBranch && (t.pr === null || t.pr === byBranch.number)) {
+    return { value: { number: byBranch.number, url: byBranch.url, state: byBranch.state }, inferred: t.pr === null }
   }
-  if (t.pr !== null && t.pr_url) return { value: { number: t.pr, url: t.pr_url, state: 'open' }, inferred: false }
-  return null
+  return logged ? { value: { ...logged, state: 'unknown' }, inferred: false } : null
 }
 
-function terminalState(path: string | null, live: Live): 'blocked' | 'working' | 'dead' | null {
-  if (!path) return null
+/** `alive`: a terminal that is neither working nor blocked; `dead`: none listed, or all gone. */
+function terminalState(path: string | null, live: Live): 'blocked' | 'working' | 'alive' | 'dead' {
+  if (!path) return 'dead'
   if (live.needsInput.includes(path)) return 'blocked'
   const own = live.terminals.filter((x) => x.worktreePath === path)
   if (own.some((x) => x.status === 'blocked')) return 'blocked'
   if (own.some((x) => x.status === 'working')) return 'working'
-  if (own.length > 0 && own.every((x) => x.status === 'gone')) return 'dead'
-  return null
+  return own.some((x) => x.status !== 'gone') ? 'alive' : 'dead'
 }
 
 type Decision = { state: TaskState; inferred: boolean }
@@ -62,7 +62,7 @@ function decide(t: LedgerTask, path: string | null, started: boolean, pr: Fact<P
   if (pr?.value.state === 'open') return { state: 'review', inferred: pr.inferred }
   if (started) {
     const exists = path !== null && live.worktrees.some((w) => w.path === path)
-    return { state: exists && terminal !== 'dead' ? 'working' : 'unknown', inferred: false }
+    return { state: exists && terminal === 'alive' ? 'working' : 'unknown', inferred: false }
   }
   if (path) return { state: 'working', inferred: true }
   return { state: 'waiting', inferred: false }
@@ -77,12 +77,15 @@ function buildRow(t: LedgerTask, plan: PlanRow | undefined, live: Live, allowanc
   const pr = matchPr(t, branch, live)
   const { state, inferred } = decide(t, path, started, pr, live)
   const trailer = live.trailerTokens?.[t.task]
-  const tokens: Cell<{ in: number; out: number }> =
-    t.tokens_in !== null
-      ? cell({ in: t.tokens_in, out: t.tokens_out ?? 0 })
+  const tokens: Cell<{ in: number | null; out: number | null }> =
+    t.tokens_in !== null || t.tokens_out !== null
+      ? cell({ in: t.tokens_in, out: t.tokens_out })
       : trailer
         ? cell(trailer, true)
         : cell(null)
+  // The model is a fact only once a dispatched/native_started event (which sets a worktree) names it.
+  const launched = t.worktree !== null || t.dispatch !== null
+  const model: Cell<string> = launched ? pick(t.model, plan?.model) : cell(t.model ?? plan?.model, true)
   return {
     task: t.task,
     title: t.title ?? plan?.title ?? `Task ${t.task}`,
@@ -92,14 +95,14 @@ function buildRow(t: LedgerTask, plan: PlanRow | undefined, live: Live, allowanc
     tier: pick(t.tier, plan?.tier),
     rung: pick(t.rung, plan?.rung),
     mode: pick(t.mode, plan?.mode),
-    model: pick(t.model, plan?.model),
+    model,
     reviews: { used: t.reviews, allowance },
     escalations: t.escalations,
     tokens,
     worktreePath: path,
     branch,
     pr: pr?.value ?? null,
-    prUnknown: live.prs === null && pr === null
+    prUnknown: live.prs === null || pr?.value.state === 'unknown'
   }
 }
 
@@ -108,7 +111,7 @@ function totalsOf(rows: TaskRow[], allowance: number): MapView['totals'] {
   return {
     done: rows.filter((r) => r.state === 'done').length,
     total: rows.length,
-    tokensIn: sum((r) => r.tokens.value?.in ?? 0),
+    tokensIn: sum((r) => r.tokens.value?.in ?? 0), // known counts only
     tokensOut: sum((r) => r.tokens.value?.out ?? 0),
     escalations: sum((r) => r.escalations),
     reviewsUsed: sum((r) => r.reviews.used),
@@ -124,7 +127,51 @@ function baseView(status: MapView['status']): MapView {
   return { status, repo: null, candidates: [], plans: [], plan: null, rows: [], totals: EMPTY_TOTALS, notes: [] }
 }
 
-export function fold(ledger: LedgerShow, live: Live, planFallback: PlanRow[] | null): MapView {
+const DEFAULT_REVIEW_CYCLES = 2 // the shipped default of limits.review_cycles
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const count = (v: unknown): number => num(v) ?? 0
+
+function normalizeTask(raw: unknown): LedgerTask | null {
+  if (!isObj(raw) || !Number.isInteger(raw.task)) return null
+  return {
+    task: raw.task as number, title: str(raw.title), tier: str(raw.tier), rung: num(raw.rung), mode: str(raw.mode),
+    model: str(raw.model), worktree: str(raw.worktree), branch: str(raw.branch), dispatch: str(raw.dispatch),
+    reviews: count(raw.reviews), escalations: count(raw.escalations), tokens_in: num(raw.tokens_in),
+    tokens_out: num(raw.tokens_out), pr: num(raw.pr), pr_url: str(raw.pr_url), merged: raw.merged === true,
+    abandoned: raw.abandoned === true, last_event: str(raw.last_event) ?? 'planned', last_ts: str(raw.last_ts) ?? ''
+  }
+}
+
+/** Shape-valid JSON in, a complete LedgerShow out: missing arrays are empty, counts 0, tokens unknown. */
+function normalizeLedger(raw: unknown): LedgerShow {
+  const src = isObj(raw) ? raw : {}
+  const r = isObj(src.repo) ? src.repo : null
+  const plans = (Array.isArray(src.plans) ? src.plans : []).flatMap((p: unknown) => {
+    if (!isObj(p) || typeof p.plan !== 'string') return []
+    const tasks = (Array.isArray(p.tasks) ? p.tasks : []).flatMap((t: unknown) => normalizeTask(t) ?? [])
+    return [{ plan: p.plan, last_ts: str(p.last_ts) ?? '', tasks }]
+  })
+  return {
+    repo: r && {
+      v: count(r.v), build_map: r.build_map === true, review_cycles: num(r.review_cycles) ?? DEFAULT_REVIEW_CYCLES,
+      this_host: str(r.this_host), repo_root: str(r.repo_root) ?? '', github: str(r.github),
+      ledger_version: str(r.ledger_version) ?? ''
+    },
+    plans,
+    skipped_lines: count(src.skipped_lines)
+  }
+}
+
+export function fold(rawLedger: LedgerShow, rawLive: Live, planFallback: PlanRow[] | null): MapView {
+  const ledger = normalizeLedger(rawLedger)
+  const live: Live = {
+    ...rawLive,
+    worktrees: rawLive?.worktrees ?? [], terminals: rawLive?.terminals ?? [],
+    needsInput: rawLive?.needsInput ?? [], prs: rawLive?.prs ?? null
+  }
   const repo = ledger.repo
   if (!repo || repo.build_map !== true) return baseView('off')
   const current = ledger.plans[0] ?? null
@@ -139,6 +186,8 @@ export function fold(ledger: LedgerShow, live: Live, planFallback: PlanRow[] | n
     .sort((a, b) => a.task - b.task)
     .map((t) => buildRow(t, planByNumber.get(t.task), live, allowance))
   const notes: string[] = []
+  const partial = rows.filter((r) => r.tokens.value && (r.tokens.value.in === null || r.tokens.value.out === null))
+  if (partial.length > 0) notes.push(`token totals leave out unknown counts for ${partial.length} task(s)`)
   if (ledger.skipped_lines > 0) notes.push(`${ledger.skipped_lines} unreadable log line(s) skipped`)
   return {
     status: 'ok',
@@ -153,7 +202,7 @@ export function fold(ledger: LedgerShow, live: Live, planFallback: PlanRow[] | n
 }
 
 function repoName(root: string): string {
-  return root.replace(/\/+$/, '').split('/').pop() || root
+  return root.replace(/\/+$/, '').split('/').pop() || 'repository'
 }
 
 // --- plan file -----------------------------------------------------------------------------

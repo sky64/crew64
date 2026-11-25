@@ -61,7 +61,14 @@ test('openPrIsReview', () => {
 test('dispatchedWithLiveWorktreeIsWorking', () => {
   const row = first(ledger([task()]), live({ terminals: [{ worktreePath: WT, status: 'working' }] }))
   assert.equal(row.state, 'working')
-  assert.equal(first(ledger([task()]), live()).state, 'working')
+  assert.equal(first(ledger([task()]), live({ terminals: [{ worktreePath: WT, status: 'waiting' }] })).state, 'working')
+})
+
+test('noTerminalForDispatchedTaskIsUnknown', () => {
+  assert.equal(first(ledger([task()]), live()).state, 'unknown')
+  assert.equal(first(ledger([task()]), live({ terminals: [{ worktreePath: '/other', status: 'working' }] })).state, 'unknown')
+  const native = task({ dispatch: null, last_event: 'native_started' })
+  assert.equal(first(ledger([native]), live()).state, 'unknown')
 })
 
 test('deadTerminalIsUnknown', () => {
@@ -125,6 +132,64 @@ test('buildMapOffGivesOffStatus', () => {
   assert.equal(fold(l, live(), null).status, 'off')
   assert.equal(fold({ repo: null, plans: [], skipped_lines: 0 }, live(), null).status, 'off')
   assert.equal(fold(ledger([]), live(), null).status, 'ok')
+})
+
+test('logPrWithGithubUnavailableIsUnknownNotReview', () => {
+  const t = task({ pr: 9, pr_url: 'https://x/9' })
+  const row = first(ledger([t]), live({ prs: null, terminals: [{ worktreePath: WT, status: 'waiting' }] }))
+  assert.equal(row.prUnknown, true)
+  assert.equal(row.pr?.state, 'unknown')
+  assert.equal(row.pr?.number, 9)
+  assert.equal(row.pr?.url, 'https://x/9')
+  assert.equal(row.state, 'working')
+  const gone = first(ledger([t]), live({ prs: null, worktrees: [] }))
+  assert.equal(gone.state, 'unknown')
+})
+
+test('partialTokensInOnly', () => {
+  const v = fold(ledger([task({ tokens_in: 100, tokens_out: null })]), live(), null)
+  assert.deepEqual(v.rows[0].tokens, { value: { in: 100, out: null }, inferred: false })
+  assert.equal(v.totals.tokensIn, 100)
+  assert.equal(v.totals.tokensOut, 0)
+  assert.equal(v.notes.length, 1)
+})
+
+test('partialTokensOutOnly', () => {
+  const v = fold(ledger([task({ tokens_in: null, tokens_out: 20 })]), live(), null)
+  assert.deepEqual(v.rows[0].tokens, { value: { in: null, out: 20 }, inferred: false })
+  assert.equal(v.totals.tokensOut, 20)
+  assert.equal(v.notes.length, 1)
+})
+
+test('plannedModelIsInferred', () => {
+  const planned = task({ worktree: null, branch: null, dispatch: null, last_event: 'planned', model: 'claude-opus-5-5' })
+  const row = first(ledger([planned]), live({ worktrees: [] }))
+  assert.deepEqual(row.model, { value: 'claude-opus-5-5', inferred: true })
+  assert.deepEqual(first(ledger([task()]), live()).model, { value: 'claude-sonnet-5-5', inferred: false })
+})
+
+test('missingLedgerFieldsDoNotThrow', () => {
+  const run = (l: unknown) => fold(l as LedgerShow, live(), null)
+  assert.equal(run({}).status, 'off')
+  assert.equal(run(null).status, 'off')
+  assert.equal(run({ repo: null }).status, 'off')
+  const repo = ledger([]).repo
+  assert.equal(run({ repo }).status, 'no-plan')
+  assert.equal(run({ repo: { build_map: true } }).status, 'no-plan')
+  const bare = { task: 1, last_event: 'dispatched', worktree: WT }
+  const v = run({ repo: { build_map: true, review_cycles: 2 }, plans: [{ plan: 'p.md', tasks: [bare, { nope: 1 }] }] })
+  assert.equal(v.rows.length, 1)
+  const r = v.rows[0]
+  assert.equal(r.reviews.used, 0)
+  assert.equal(r.escalations, 0)
+  assert.equal(r.tokens.value, null)
+  assert.equal(r.title, 'Task 1')
+  assert.equal(Number.isNaN(v.totals.tokensIn), false)
+  assert.equal(Number.isNaN(v.totals.reviewsUsed), false)
+  const empty = run({ repo, plans: [{ plan: 'p.md' }], skipped_lines: 'x' })
+  assert.equal(empty.status, 'ok')
+  assert.equal(empty.rows.length, 0)
+  assert.deepEqual(empty.notes, [])
 })
 
 import { readFileSync } from 'node:fs'

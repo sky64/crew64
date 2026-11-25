@@ -4,7 +4,7 @@ export type TaskState = 'waiting' | 'working' | 'blocked' | 'review' | 'done' | 
 /** A value for display: `inferred` marks it `~`, a null value shows `—`. */
 export type Cell<T> = { value: T | null; inferred: boolean }
 
-export type PrInfo = { number: number; url: string; state: 'open' | 'merged' | 'closed' }
+export type PrInfo = { number: number; url: string; state: 'open' | 'merged' | 'closed' | 'unknown' }
 
 export type TaskRow = {
   task: number
@@ -19,7 +19,8 @@ export type TaskRow = {
   model: Cell<string>
   reviews: { used: number; allowance: number }
   escalations: number
-  tokens: Cell<{ in: number; out: number }>
+  /** Each direction is null when unknown; a missing count is never shown as 0. */
+  tokens: Cell<{ in: number | null; out: number | null }>
   worktreePath: string | null
   branch: string | null
   pr: PrInfo | null
