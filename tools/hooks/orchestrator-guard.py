@@ -209,11 +209,36 @@ def _memory_shape(path: str, base: str) -> bool:
             and all(part not in ("", ".", "..") for part in parts[4:]))
 
 
+def _resolve_existing(path: str):
+    """(real path, exists) with errors propagated (Codex review of 25803ea,
+    blocker 2). The longest existing prefix is resolved with
+    realpath(strict=True), so a symlink loop, a dangling symlink or a file
+    used as a directory raises. Only missing trailing components, the ones a
+    new file would create, are tolerated, and only below a directory. Works
+    on Python 3.13: no reliance on os.path.ALLOW_MISSING."""
+    head, tail = path, []
+    while True:
+        try:
+            os.lstat(head)  # ELOOP, ENOTDIR, EACCES and the like propagate
+            break
+        except FileNotFoundError:
+            parent = os.path.dirname(head)
+            if parent == head:
+                raise
+            tail.append(os.path.basename(head))
+            head = parent
+    real = os.path.realpath(head, strict=True)
+    if tail and not os.path.isdir(real):
+        raise NotADirectoryError(real)
+    return os.path.join(real, *reversed(tail)), not tail
+
+
 def memory_target(target, home=None) -> bool:
     """True when target is a Claude Code memory file: absolute, no '..'
     segment, both the unresolved and the real path below
     <home>/.claude/projects/<one dir>/memory/, and neither path inside a
-    repository or git admin dir. home defaults to the password database entry
+    repository or git admin dir; existing components resolve strictly and an
+    existing target must have one link. home defaults to the password database entry
     for this uid; the parameter exists for the unit test, and the hook never
     sets it. Any error while checking denies."""
     try:
@@ -225,12 +250,16 @@ def memory_target(target, home=None) -> bool:
         if not isinstance(home, str) or not os.path.isabs(home):
             return False
         unresolved = os.path.normpath(target)
-        real = os.path.realpath(target)
-        real_home = os.path.realpath(home)
+        real, exists = _resolve_existing(unresolved)
+        real_home = os.path.realpath(home, strict=True)
         if not (_memory_shape(unresolved, os.path.normpath(home))
                 or _memory_shape(unresolved, real_home)):
             return False
         if not _memory_shape(real, real_home):
+            return False
+        # A second name for the inode could be a repository file (Codex review
+        # of 25803ea, blocker 1). Any stat error raises and denies.
+        if exists and os.stat(real).st_nlink > 1:
             return False
         return not (inside_repository(unresolved) or inside_repository(real))
     except Exception:
