@@ -159,7 +159,7 @@ need skills/orchestrator/SKILL.md "Runtime:"
 need skills/orchestrator/SKILL.md "outside that floor are out of scope"
 need docs/05-delegation.md "Runtime:"
 need AGENTS.md "Python 3.13+"
-need .claude-plugin/plugin.json '"version": "0.8.5"'
+need .claude-plugin/plugin.json '"version": "0.9.0"'
 # Field fixes 2026-11-18: briefs travel by --spec-file from the scratchpad.
 need skills/orchestrator/SKILL.md "--spec-file"
 need skills/orchestrator/SKILL.md "the guard allows Write and Edit there"
@@ -167,7 +167,7 @@ need README.md "/harness-enable"
 need tools/harness-enable-skill/SKILL.md "crew64@crew64"
 need tools/harness-enable-skill/enable.sh.tmpl "@CREW64_ENABLE@"
 need skills/orchestrator/SKILL.md "orca-version-check.sh"
-need docs/12-orca-setup.md "| Orca | 1.4.255"
+need docs/12-orca-setup.md "| Orca | 1.4.271"
 need AGENTS.md "test-orca-version-check.sh"
 need skills/orchestrator/SKILL.md "At rung 2, an escalation re-dispatches at rung 2"
 need skills/orchestrator/SKILL.md "model parameter of the Agent tool"
@@ -276,6 +276,51 @@ forbid docs/11-plugin-install.md "The orchestrator does not write or commit."
 # This repository's own CLAUDE.md agrees with AGENTS.md on native mode.
 need CLAUDE.md "in the main checkout"
 forbid CLAUDE.md "does not write code; specialists implement"
+
+
+# Decision 0010: field fixes of 2026-11-26.
+# The session runs in the repository its tasks change.
+need skills/orchestrator/SKILL.md "The session runs in a workspace of the repository its tasks change."
+# DeepSeek at rung 2 only where the host names a "2" overlay; never the rung 0 one; escalation goes to Claude.
+need docs/05-delegation.md 'only where that host entry'"'"'s `dsh_profiles` has a non-empty `"2"` name'
+need docs/05-delegation.md "never the rung 0 one"
+need docs/05-delegation.md "never goes back to the DeepSeek row"
+need docs/05-delegation.md "changed the rung 2 DeepSeek cell without such numbers"
+need skills/orchestrator/SKILL.md 'dsh_profiles` has a non-empty `"2"` name'
+need skills/orchestrator/SKILL.md "never back to the DeepSeek row"
+need skills/orchestrator/SKILL.md "rung-2 Claude worker (never the DeepSeek row)"
+need docs/templates/plan.md 'names a `"2"` overlay'
+forbid docs/05-delegation.md "not used; rung 2 implementation goes to the Claude row"
+forbid config/examples/orca-solvela.json '"2":'
+forbid config/crew64.defaults.json "dsh_profiles"
+# Reviews: complete first pass, blocker or follow-up, re-review scoped to the fix.
+need skills/orchestrator/SKILL.md "the review is complete, not incremental"
+need skills/orchestrator/SKILL.md 'Mark each finding `blocker` or `follow-up`'
+need skills/orchestrator/SKILL.md "Only blockers start a correction cycle."
+need skills/orchestrator/SKILL.md "names the earlier blockers and the fix commit range"
+need AGENTS.md 'each marked `blocker` or `follow-up`; only blockers start a correction cycle'
+# Order: review until clean, deploy once, live check, merge.
+need skills/orchestrator/SKILL.md "implement, review until clean, deploy the reviewed head once, run the live check, then merge"
+need skills/orchestrator/SKILL.md "A branch is not deployed before its review is clean"
+need AGENTS.md "review until clean, deploy the reviewed head once, run the live check, then merge"
+# No polling: end the turn; the installed guide wins.
+need skills/orchestrator/SKILL.md "end the turn after \`worker-start\`"
+need skills/orchestrator/SKILL.md "the installed guide wins"
+need skills/orchestrator/SKILL.md "worker-read --dispatch"
+forbid skills/orchestrator/SKILL.md "--timeout-ms 900000"
+forbid skills/orchestrator/SKILL.md "check --ack <delivery id>"
+need docs/12-orca-setup.md "## Orca 1.4.271 checks"
+# The guard allows Claude Code memory files, home from the password database.
+need tools/hooks/orchestrator-guard.py "def memory_target"
+need tools/hooks/orchestrator-guard.py "pwd.getpwuid(os.getuid()).pw_dir"
+need docs/05-delegation.md "Claude Code memory files"
+# Orchestrator default and the global CLAUDE.md section.
+need config/crew64.defaults.json '"orchestrator": "claude-fable-5-2"'
+need docs/05-delegation.md "shipped default \`claude-fable-5-2\`"
+need skills/orchestrator/SKILL.md "shipped default \`claude-fable-5-2\`"
+forbid skills/orchestrator/SKILL.md "claude-fable-5-1"
+need skills/orchestrator/SKILL.md "Agent roles (Orca)"
+need docs/decisions/0010-field-fixes-2026-11-26.md "no such numbers exist yet"
 
 # Decision 0005: the defaults file validates, and every model id it ships
 # appears in the docs/05 ladder table, so the table and the file cannot drift.
