@@ -301,10 +301,10 @@ out="$(run "$M3" status)"; case "$out" in *"config=untrusted:"*"hosts=none this_
 
 # 26. models.orchestrator and the worktree-access settings: optional, defaults apply
 sethosts '{}'
-out="$(run "$M" get models.orchestrator)"; [ "$out" = "claude-fable-5-1" ] && ok "get models.orchestrator → the default" || bad "orchestrator default: $out"
+out="$(run "$M" get models.orchestrator)"; [ "$out" = "claude-fable-5-2" ] && ok "get models.orchestrator → the default" || bad "orchestrator default: $out"
 python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); del d["models"]["orchestrator"]; del d["features"]["native_worktree_access"]; del d["platform"]["worktree_root"]; json.dump(d,open(sys.argv[2],"w"))' "$DEFAULTS" "$M/.claude/crew64.json"
 out="$(run "$M" status)"; case "$out" in *"models=defaults"*) ok "a models block without orchestrator is no deviation";; *) bad "orchestrator absent deviation: $out";; esac
-out="$(run "$M" get models.orchestrator)"; [ "$out" = "claude-fable-5-1" ] && ok "absent models.orchestrator reads as the default" || bad "orchestrator absent get: $out"
+out="$(run "$M" get models.orchestrator)"; [ "$out" = "claude-fable-5-2" ] && ok "absent models.orchestrator reads as the default" || bad "orchestrator absent get: $out"
 out="$(run "$M" get features.native_worktree_access)"; [ "$out" = "true" ] && ok "absent native_worktree_access reads as true" || bad "access absent: $out"
 out="$(run "$M" get platform.worktree_root)"; [ "$out" = "~/orca/workspaces" ] && ok "absent platform.worktree_root reads as the default" || bad "worktree_root absent: $out"
 out="$(run "$M" check "$M/.claude/crew64.json")"; [ $? = 0 ] && ok "check accepts a config without the three optional keys" || bad "check optional keys: $out"
@@ -318,5 +318,13 @@ done
 setfeat '"yes"' native_worktree_access
 out="$(run "$M" check "$M/.claude/crew64.json")"; rc=$?
 [ "$rc" = 1 ] && case "$out" in *"features.native_worktree_access must be true or false"*) true;; *) false;; esac && ok "check a non-bool native_worktree_access → exit 1" || bad "check access: rc=$rc out=$out"
+
+# 27. field fixes 2026-11-26: a host may name a rung 2 overlay in dsh_profiles
+# ("2"); check accepts it, and the shipped example does not set it.
+sethosts '{"box-a": {"deepseek_agent": "dsh-tui", "dsh_profiles": {"0": "a", "1": "b", "2": "c"}}}'
+out="$(run "$M" check "$M/.claude/crew64.json")"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] && ok "check a host with dsh_profiles \"2\" → exit 0, silent" || bad "check dsh_profiles 2: rc=$rc out=$out"
+out="$(python3 -I -c 'import json,sys; h=json.load(open(sys.argv[1]))["platform"]["hosts"]; print(any("2" in (e.get("dsh_profiles") or {}) for e in h.values()))' "$EXAMPLE")"
+[ "$out" = "False" ] && ok "the example config sets no rung 2 overlay" || bad "example dsh_profiles 2: $out"
 
 exit $fail

@@ -6,7 +6,7 @@ Verified on this machine on 2026-10-27 from a Claude session inside an Orca term
 
 | Item | Result |
 |---|---|
-| Orca | 1.4.255 verified 2026-11-17 on the local host (1.4.242 at the 2026-10-27 setup; `tools/orca-version-check.sh` compares the running version with this row), runtime ready, 15 repositories under `~/Projects` registered, one SSH target (`gach-staging`) registered and not connected |
+| Orca | 1.4.271 verified 2026-11-26 on the local host (`orca --version` printed `1.4.271`; `orca status --json` showed `"appVersion": "1.4.271"` and runtime `"state": "ready"`; 22 repositories registered in `orca repo list`; the re-checked rows are under "Orca 1.4.271 checks" below). Earlier: 1.4.255 on 2026-11-17, 1.4.242 at the 2026-10-27 setup. `tools/orca-version-check.sh` compares the running version with this row. One SSH target (`gach-staging`) was registered and not connected at 1.4.255; not re-checked |
 | Claude Code hooks | Orca's agent hooks are in `~/.claude/settings.json` for every hook event; the hook port and token are in the Orca terminal environment |
 | Native subagents | Available inside Orca-launched Claude. An Explore subagent ran a command and returned. Cloud Room disabled these |
 | Worktree creation | `orca worktree create --repo name:<repo> --name <name> --no-parent --base-branch <ref> --setup skip --json` creates `~/orca/workspaces/<repo>/<name>` on branch `sky64/<name>` |
@@ -58,3 +58,16 @@ Rows for the ladder in [docs/05](05-delegation.md), "Model ladder" and "Ladder r
 | Claude Code carries `x-solvela-session` for a Claude session routed through Solvela | not run | Unverified and not scheduled: the owner has not moved any Claude session off the subscription (decision 0004, Owner items). |
 | One Solvela team per role with hourly and daily budgets | not run | Unverified: needs the Solvela org, teams and budget figures (owner item). |
 | Solvela team stats `by_model` return rows for a test session | not run | Unverified: needs the teams above and one test dispatch with `x-solvela-session` set. Solvela source confirms `spend_logs.session_id` (migration 003) and the `by_model` breakdown in the team stats route. |
+
+## Orca 1.4.271 checks
+
+Run on the local host on 2026-11-26 by the implementer of the 2026-11-26 field fixes ([decision 0010](decisions/0010-field-fixes-2026-11-26.md)). Each row quotes the output line it rests on.
+
+| Row | What was run | Result |
+|---|---|---|
+| Running version | `orca --version` | Verified: `1.4.271`. |
+| The orchestrator waits by ending its turn, not by polling | `orca skills get orchestration` | Verified. The guide says, after starting workers: "Then **end your turn**. "Report back" and "tell me when it's done" still mean end your turn; Orca wakes you and you report then." Under "Never": "Poll or run watch scripts: a script's plain `check` takes your mail, so it is hidden from you and Orca has nothing to wake you with. Orca wakes you." Under "When Orca wakes you": "In a chat, each message arrives whole as its own message: act on it." The orchestrator skill now ends the turn after `worker-start` instead of running `check --wait`. |
+| `check --ack` is not needed | `orca orchestration check --help` | Verified: "--ack: optional; acknowledges a batch from an older Orca that does not mark it." and "A consuming check marks the batch it returns as handled, so the next check returns newer mail; no --ack is needed." The skill's `check --ack` instruction is removed. |
+| Mail after lost context | `orca orchestration check --help`, `orca skills get orchestration` | Verified: "Lost track? `ORCA orchestration inbox --terminal run:<run_id> --limit 50` shows mail `check` already handled." |
+| Orca still passes a model and effort to Claude and Codex workers | `orca orchestration worker-start --help` | Verified: `--model <id>` "Provider model id for a new agent launch", `--effort <level>` "Reasoning effort for the selected model"; "Other agents, including zcode, launch with the model from their own config." |
+| Claude Code memory writes under the guard | `bash tools/hooks/test-orchestrator-guard.sh` | Unit test only: the hook allows the file write tools on `<home>/.claude/projects/<dir>/memory/` from the main checkout and from a worktree, and denies the other cases listed in decision 0010. Not yet exercised in a live orchestrator session. |
