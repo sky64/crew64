@@ -310,6 +310,13 @@ need skills/orchestrator/SKILL.md "worker-read --dispatch"
 forbid skills/orchestrator/SKILL.md "--timeout-ms 900000"
 forbid skills/orchestrator/SKILL.md "check --ack <delivery id>"
 need docs/12-orca-setup.md "## Orca 1.4.271 checks"
+# Codex review of 25803ea, blocker 3: only a blocker escalates.
+need docs/05-delegation.md 'the reviewer records a finding it marked `blocker` under the review rules'
+need skills/orchestrator/SKILL.md 'the reviewer records a finding it marked `blocker` under the review rules'
+need docs/decisions/0010-field-fixes-2026-11-26.md 'a reviewer finding marked `blocker` under section 3'
+forbid docs/05-delegation.md "reviewer records a correctness finding"
+forbid skills/orchestrator/SKILL.md "reviewer records a correctness finding"
+forbid docs/decisions/0010-field-fixes-2026-11-26.md "reviewer correctness finding"
 # The guard allows Claude Code memory files, home from the password database.
 need tools/hooks/orchestrator-guard.py "def memory_target"
 need tools/hooks/orchestrator-guard.py "pwd.getpwuid(os.getuid()).pw_dir"
