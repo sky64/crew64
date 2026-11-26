@@ -249,7 +249,13 @@ def memory_target(target, home=None) -> bool:
         home = _passwd_home() if home is None else home
         if not isinstance(home, str) or not os.path.isabs(home):
             return False
-        unresolved = os.path.normpath(target)
+        # Only a target already in normal form: normalizing a trailing
+        # separator, a doubled separator or a "." segment away could hide an
+        # existing file used as a directory from the strict resolver
+        # (re-review of 05ec4c0).
+        if target != os.path.normpath(target):
+            return False
+        unresolved = target
         real, exists = _resolve_existing(unresolved)
         real_home = os.path.realpath(home, strict=True)
         if not (_memory_shape(unresolved, os.path.normpath(home))

@@ -433,6 +433,12 @@ memcase False "injected home: an existing file used as a directory" "$H/.claude/
 ln -s "$TMP/missing-target" "$H/.claude/projects/p/memory/dangling"
 memcase False "injected home: a dangling symlink on the way" "$H/.claude/projects/p/memory/dangling/x.md" "$H"
 memcase True  "injected home: new file in new subdirectories below memory/" "$H/.claude/projects/p/memory/new/dir/x.md" "$H"
+# Re-review of 05ec4c0: a target not in normal form is denied, so normalizing
+# cannot hide an existing file used as a directory (existing.md exists here).
+memcase False "injected home: existing file with a trailing separator" "$H/.claude/projects/p/memory/existing.md/" "$H"
+memcase False "injected home: existing file followed by /." "$H/.claude/projects/p/memory/existing.md/." "$H"
+memcase False "injected home: existing file followed by //" "$H/.claude/projects/p/memory/existing.md//" "$H"
+memcase False "injected home: a doubled separator inside a valid path" "$H/.claude/projects/p//memory/existing.md" "$H"
 git -C "$H" init -q 2>/dev/null
 memcase False "injected home that is itself a repository" "$H/.claude/projects/p/memory/x.md" "$H"
 rm -rf "$H/.git"
