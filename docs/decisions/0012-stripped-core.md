@@ -1,6 +1,6 @@
 # 0012: A stripped core, with everything else decided by the plan
 
-Date: 2026-11-27. Status: proposed. The owner asked for this page to be recorded; it is not accepted and nothing in force changes with it. The open points at the end are the orchestrator's objections to the draft and are not decided.
+Date: 2026-11-27. Status: proposed. The owner asked for this page to be recorded; it is not accepted and nothing in force changes with it. Revised the same day at the owner's request: five of the orchestrator's objections to the first draft are now part of the proposal (marked "revision" below). Two open points remain at the end and are not decided.
 
 ## Context
 
@@ -12,72 +12,86 @@ Date: 2026-11-27. Status: proposed. The owner asked for this page to be recorded
 
 ## Proposed decision
 
-**Purpose.** One loop, the same in every repository: plan, dispatch, implement, review, merge. Everything else is a module that a repository's plan turns on. A simple build runs on the core alone.
+**Purpose.** One loop, the same in every repository: plan, do the task, review, merge. Everything else is a module that a repository's plan turns on. A simple build runs on the core alone.
 
-**1. Three roles.**
+**1. Roles and the default mode.**
 
-- Orchestrator: plans, dispatches, checks results, merges. Writes no code.
-- Implementer: one per task, in its own worktree.
+- Implementer: the session that does one task, in its own worktree.
 - Reviewer: an independent context that ends with one verdict line.
+- Orchestrator: plans, dispatches, checks results, merges. Writes no code.
+- Revision: the default mode is solo. One session does the task alone in a worktree, and the review follows. A row is dispatched to a worker only when the plan says so, for example because tasks run in parallel or need another vendor.
+- Revision: an orchestrator session ends when its task is merged or stopped. The plan, with each row's status, is the state that carries over to the next session. No session carries the history of earlier tasks.
 
 **2. The plan is the only place where decisions are made.** It is written once, when the repository or a piece of work is formed. Each task row carries:
 
 - what to do, the files, and the acceptance checks;
 - the specialist: one agent and its skills, by exact name;
 - the model and its effort setting, for the implementer and for the reviewer;
-- the mode: one session does it alone, or a worker is dispatched;
+- the mode: solo (the default) or dispatched, with the reason for dispatching;
 - how many correction rounds are allowed before the owner is asked.
 
-The plan also lists the modules that are on, and what the owner must supply. A single task is a one-row plan. There is no ladder, tier table or escalation rule at dispatch; dispatch reads the row.
+The plan also lists the modules that are on, and what the owner must supply. A single task is a one-row plan. There is no ladder or tier table at dispatch; whoever starts the task reads the row.
 
-**3. Equipping is one step, and skipping it is blocked.**
+Revision, how the model is chosen:
+
+- The default for a row is the cheapest model whose result the row's acceptance checks can verify. A stronger model needs a reason in the row.
+- Measured tokens and correction rounds of finished rows are recorded in the plan, and the next plan is written with them in view.
+- A row that fails its checks or its review moves one model step up, once. After that the owner is asked. This is the only escalation rule.
+
+**3. Equipping is one step, and skipping it is visible.**
 
 - The planner searches the skill library with one command and writes the matching names into the row.
 - If nothing fits, the plan gets an earlier task: write the missing skill to the standard.
-- A check refuses to dispatch a row without a named specialist.
+- A check refuses to start a row without a named specialist.
 - A generic agent is allowed only where the plan says so with a reason, never on a row the plan marks difficult.
 - The brief is generated from the row with the skill text already pasted in, so the equipped path is the shortest path.
+- Revision: the check only makes an omission visible; any name satisfies it. The control is the owner's approval of the plan, so the plan shows the specialist of every row in one column.
+- Revision: whether a specialist does better than a generic agent with the same skill text has not been measured. The report of each task records the specialist used and the correction rounds, so that it can be.
 
 **4. Skill standard and library.**
 
-- A skill is one folder with one file and a fixed header: name, when to use it, tags for technology and domain, inputs, outputs, how to verify, origin.
-- It holds no repository-specific paths; those are parameters.
-- A project writes new skills to this standard. A skill that passes review is promoted to one shared library with a generated index, searchable by name, tag and description.
+- Revision: the standard is Claude Code's skill format, one folder with a `SKILL.md` whose header has a name and a description that says when to use it. The core adds a few required header fields: tags for technology and domain, inputs, outputs, how to verify, origin.
+- A skill holds no repository-specific paths; those are parameters.
+- A project writes new skills to this standard. A skill that passes review is promoted to the library.
+- Revision: the library is a plain repository with an index file generated from the headers. Searching it is a text search of that index. Nothing more is built until the number of skills makes that insufficient.
 - Plans search the library first.
 
-**5. Guard.** One hook stops the orchestrator from writing in the main checkout.
+**5. Guard.** One hook stops a session from writing in the main checkout.
 
 **6. Review and merge.** Every pull request head gets one independent review. Merge needs CI green and a clean verdict on the same head ([decision 0011](0011-machine-merge-gate.md)).
 
-**7. Report.** What changed, what was checked, what is untested, and measured tokens.
+Revision, the owner's waiver. A reviewer may call any wrong behaviour a blocker, so a task that rests on a heuristic can fail review without end. The owner, and only the owner, can accept one named finding as a documented limit:
+
+- the limit is written where users of the code will read it;
+- the waiver is recorded on the pull request and as the review status of that head, with a description that begins `owner waiver:` and names the finding;
+- it covers that finding on that head and nothing else.
+
+**7. Report.** What changed, what was checked, what is untested, measured tokens, the specialist used and the correction rounds.
 
 **Not in the core.** These are modules, off unless the plan turns them on: bot identity, a metering gateway, the read-only scout, deploy and live checks, and anything project-specific.
 
-**Size budget.** The core rules the orchestrator reads fit in 8 KB. Each module fits on one page. CI enforces both.
+**Size budget.** The core rules a session reads fit in 8 KB. Each module fits on one page. CI enforces both.
 
 ## What exists and what would be built
 
 | Part | State |
 |---|---|
-| Plan template, `plan-tooling` skill | exists |
+| Plan template, `plan-tooling` skill | exists; the template needs the new columns |
 | Guard hook | exists |
-| Review status script, CI gate | exists |
+| Review status script, CI gate | exists; the waiver description is new |
+| Solo mode in a task worktree | exists as "native mode" ([decision 0009](0009-process-ladder.md)); becomes the default |
+| Measured tokens per task | a ledger script is in review and not merged |
 | Cut-down core rule text | to build (mostly deletion and splitting) |
-| Dispatch check for a named specialist | to build |
+| Check for a named specialist | to build |
 | Brief generator from a plan row | to build |
-| Skill standard, library, search command | to build |
+| Skill header fields, library repository, index | to build (small) |
 
-## Open points (orchestrator's objections, not decided)
+## Open points (not decided)
 
-1. **The page keeps the loop that costs the most.** Shorter rules cut the fixed context, but the orchestrator's cost is mostly the history it carries: every worker report, review and check result. The page should make "one session does the task alone, then review" the default mode and dispatch the exception, and should end the orchestrator session per task, with the plan as the state that carries over.
-2. **A planner without numbers picks the strongest model.** The plan needs a stated default (the cheapest model whose result the row's checks can verify) and measured results fed back into the next plan. One small rule for a failed row is still needed, for example one step up, once.
-3. **A name check does not ensure fit.** A check for a named specialist is satisfied by any name, including a broad agent. What a specialist adds over a generic agent given the same skill text has not been measured here. The owner's review of the plan is the real control; the check only makes omission visible.
-4. **The library may be early.** The repository vendors two skills. Claude Code's skill format already has a header and a description the model searches. The standard should be that format plus the few fields above, and the library a plain repository with a generated index, until there are enough skills to need more.
-5. **The review rule can deadlock.** With "merge needs a clean verdict" and no limit on what a reviewer may call a blocker, a task can fail review indefinitely on a heuristic. The core needs a recorded way for the owner to accept a documented limit.
-6. **Much of the dispatch plumbing is Orca's.** Worktrees, worker start with model and effort, supervision and wake-up mail, review bots and CI mail are Orca features with their own short guide. The core should name what it adds to Orca (the plan format, the equip rule, the guard, the gate status, the report) and describe none of Orca's commands itself.
-7. **Regrowth.** Decision 0002 made the same choice and the text grew back. The size budget in CI is the only item on this page that prevents that, so it should come first.
+1. **Much of the dispatch plumbing is Orca's.** Worktrees, worker start with model and effort, supervision and wake-up mail, review bots and CI mail are Orca features with their own short guide. The core should name what it adds to Orca (the plan format, the equip rule, the guard, the gate status, the report) and describe none of Orca's commands itself. Whether Orca's task records can carry a plan's rows is not yet checked.
+2. **Regrowth.** Decision 0002 made the same choice and the text grew back. The size budget in CI is the only item on this page that prevents that, so it should come first.
 
 ## Consequences if accepted
 
-- The orchestrator skill, `AGENTS.md` and docs/05 are cut and split; the model ladder ([0004](0004-model-ladder.md)), the process ladder ([0009](0009-process-ladder.md)) and the tier table ([0001](0001-tiered-protocol.md)) become plan columns or modules. Each of those changes is delegation policy and needs its own reviewed pull request.
+- The orchestrator skill, `AGENTS.md` and docs/05 are cut and split; the model ladder ([0004](0004-model-ladder.md)), the process ladder ([0009](0009-process-ladder.md)) and the tier table ([0001](0001-tiered-protocol.md)) become plan columns or modules. The waiver narrows [decision 0011](0011-machine-merge-gate.md). Each of those changes is delegation policy and needs its own reviewed pull request.
 - Nothing changes until then.
