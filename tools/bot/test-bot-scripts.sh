@@ -178,4 +178,44 @@ out="$(cd "$R" && "$BOT/gh-bot" x 2>/dev/null)"; rc=$?
 out="$(cd "$R" && printf 'host=github.com\n\n' | "$BOT/git-credential-op-bot" get 2>/dev/null)"
 case "$out" in *"username=B"*password=tok-1*) ok "repo-local name is ignored by the credential helper";; *) bad "helper with repo-local keys: '$out'";; esac
 
+# 9. review-status.sh (decision 0011): the Codex verdict as a commit status on one SHA,
+# through a stubbed gh-bot that records its arguments and answers like the API.
+RS="$BOT/review-status.sh"; SHA="0123456789abcdef0123456789abcdef01234567"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/gh-bot.args"\nfor a in "$@"; do case "$a" in state=*) echo "${a#state=}";; esac; done\n' "$TMP" > "$TMP/gh-bot-stub"; chmod +x "$TMP/gh-bot-stub"
+rs() { rm -f "$TMP/gh-bot.args"; out="$(GH_BOT="$TMP/gh-bot-stub" "$RS" "$@" 2>&1)"; rc=$?; }
+rs sky64/crew64 "$SHA" clean "codex review clean at $SHA"
+[ "$rc" = 0 ] && [ "$out" = success ] && ok "review-status clean → success, prints the API state" || bad "clean: rc=$rc out=$out"
+args="$(cat "$TMP/gh-bot.args" 2>/dev/null)"
+[ "$(sed -n 1p "$TMP/gh-bot.args")" = api ] && grep -qx -- "repos/sky64/crew64/statuses/$SHA" "$TMP/gh-bot.args" && grep -qx -- "--method" "$TMP/gh-bot.args" && grep -qx POST "$TMP/gh-bot.args" \
+  && grep -qx context=codex-review "$TMP/gh-bot.args" && grep -qx state=success "$TMP/gh-bot.args" && grep -qx "description=codex review clean at $SHA" "$TMP/gh-bot.args" \
+  && ok "review-status posts context codex-review to repos/<owner/repo>/statuses/<sha>" || bad "endpoint/fields: $(echo "$args" | tr '\n' ' ')"
+rs sky64/crew64 "$SHA" findings "2 blockers"
+[ "$rc" = 0 ] && [ "$out" = failure ] && grep -qx state=failure "$TMP/gh-bot.args" && ok "review-status findings → failure" || bad "findings: rc=$rc out=$out"
+rs sky64/crew64 "$SHA" clean "no review required: docs-only native diff"
+[ "$rc" = 0 ] && grep -qx "description=no review required: docs-only native diff" "$TMP/gh-bot.args" && ok "review-status records the no-review-required description" || bad "no review: rc=$rc out=$out"
+refuses() { # label args... : exit 2 and gh-bot never called
+  local label="$1"; shift; rs "$@"
+  [ "$rc" = 2 ] && [ ! -e "$TMP/gh-bot.args" ] && ok "review-status refuses $label, gh-bot not called" || bad "$label: rc=$rc out=$out called=$([ -e "$TMP/gh-bot.args" ] && echo yes)"
+}
+refuses "a short SHA" sky64/crew64 0123456 clean d
+refuses "a 39-character SHA" sky64/crew64 "${SHA%?}" clean d
+refuses "a 41-character SHA" sky64/crew64 "${SHA}0" clean d
+refuses "an uppercase SHA" sky64/crew64 "$(printf %s "$SHA" | tr a-f A-F)" clean d
+refuses "a branch name as SHA" sky64/crew64 main clean d
+refuses "a SHA with a trailing newline" sky64/crew64 "$SHA"$'\n' clean d
+refuses "an unknown verdict" sky64/crew64 "$SHA" approved d
+refuses "an empty verdict" sky64/crew64 "$SHA" "" d
+refuses "a repo without owner" crew64 "$SHA" clean d
+refuses "a repo with a path climb" "sky64/crew64/../x" "$SHA" clean d
+refuses "a repo part that is .." "sky64/.." "$SHA" clean d
+refuses "an owner that is ." "./crew64" "$SHA" clean d
+refuses "an empty description" sky64/crew64 "$SHA" clean ""
+refuses "a multi-line description" sky64/crew64 "$SHA" clean $'line one\nline two'
+refuses "a description over 140 characters" sky64/crew64 "$SHA" clean "$(printf 'x%.0s' $(seq 141))"
+refuses "three arguments" sky64/crew64 "$SHA" clean
+refuses "five arguments" sky64/crew64 "$SHA" clean d extra
+printf '#!/usr/bin/env bash\necho "HTTP 422" >&2; exit 1\n' > "$TMP/gh-bot-fail"; chmod +x "$TMP/gh-bot-fail"
+out="$(GH_BOT="$TMP/gh-bot-fail" "$RS" sky64/crew64 "$SHA" clean d 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ok "review-status fails when the API call fails" || bad "api failure: rc=$rc out=$out"
+
 exit $fail
