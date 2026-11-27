@@ -1,6 +1,6 @@
 # crew64
 
-Development workflow on [Orca](https://orca.stably.ai): Claude orchestrates and never writes in the main checkout, specialist agents implement in Orca worktrees (the orchestrator does one small, bounded, non-risky task itself in a task worktree; see the process ladder in the policy), Codex independently reviews, and the owner approves where branch protection requires it. Merge and deploy are performed by the agent identity after a clean, verified review and reported to the owner ([decision](docs/decisions/2026-10-25-agent-merge-and-deploy.md)). Policy: [docs/05-delegation.md](docs/05-delegation.md). The move from Cloud Room to Orca is [decision 0003](docs/decisions/0003-orca.md).
+Development workflow on [Orca](https://orca.stably.ai): Claude orchestrates and never writes in the main checkout, specialist agents implement in Orca worktrees (the orchestrator does one small, bounded, non-risky task itself in a task worktree; see the process ladder in the policy), Codex independently reviews, and machine gates decide the merge: the `ci` check green and the `codex-review` commit status `success` on the same head, plus the orchestrator's verification. Merge and deploy are performed by the agent identity and reported to the owner, who is told of every merge and does not approve it ([decision](docs/decisions/2026-10-25-agent-merge-and-deploy.md), [decision 0011](docs/decisions/0011-machine-merge-gate.md)). Policy: [docs/05-delegation.md](docs/05-delegation.md). The move from Cloud Room to Orca is [decision 0003](docs/decisions/0003-orca.md).
 
 Start with the [Orca setup record](docs/12-orca-setup.md). Shared instructions are in [AGENTS.md](AGENTS.md), imported by [CLAUDE.md](CLAUDE.md) for Claude; Codex reads AGENTS.md directly.
 
@@ -25,7 +25,7 @@ A repo's config governs only after its main checkout is registered as `crew64.tr
 
 The [architecture proposal](docs/01-architecture-proposal.md) and [capability matrix](docs/02-compatibility-matrix.md) define the intended boundaries and remaining checks. Additional harnesses and production deployment are deferred. Jev was tried once as a second opinion, recorded in the [Jev pilot](docs/07-jev-pilot.md); it is not integrated.
 
-The [automatic Codex review trial](docs/10-automatic-review.md) and its GitHub Action forwarded bot PRs to a Cloud Room webhook. The Action is removed with decision 0003; automatic review is to be rebuilt as an Orca automation. Until then the orchestrator starts the Codex reviewer as an Orca worker. Human approval remains manual; merging is governed by the [2026-10-25 standing authorization](docs/decisions/2026-10-25-agent-merge-and-deploy.md).
+The [automatic Codex review trial](docs/10-automatic-review.md) and its GitHub Action forwarded bot PRs to a Cloud Room webhook. The Action is removed with decision 0003; automatic review is to be rebuilt as an Orca automation. Until then the orchestrator starts the Codex reviewer as an Orca worker. Merging is governed by the [2026-10-25 standing authorization](docs/decisions/2026-10-25-agent-merge-and-deploy.md) and the machine merge gate of [decision 0011](docs/decisions/0011-machine-merge-gate.md); no human approval is required.
 
 The [original audit](docs/00-audit-and-architecture-proposal.md) and the Cloud Room setup record ([docs/03](docs/03-cloudroom-setup.md)) are historical.
 

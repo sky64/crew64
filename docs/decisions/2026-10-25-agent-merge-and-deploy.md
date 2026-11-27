@@ -12,7 +12,7 @@ The owner (sky64) ruled: "I want to know when a merge happens but not to be the 
 - Every merge and every deployment is reported to the owner in the task thread and recorded on the PR with the merge SHA and time.
 - The owner may revoke or narrow this at any time.
 - New paid services, permission changes, external communications, and credential changes still require explicit per-case authorization.
-- Main in this repository requires one approving review that the agent cannot give itself. The merge still waits for a human approval, and that is recorded, not hidden.
+- Main in this repository requires one approving review that the agent cannot give itself. The merge still waits for a human approval, and that is recorded, not hidden. Superseded on 2026-11-26 by [decision 0011](0011-machine-merge-gate.md): the merge gate is the `ci` check and the `codex-review` status, and no human approval is required.
 
 This replaces the text that made merge and production deployment owner-performed actions requiring explicit authorization. See [AGENTS.md](../../AGENTS.md) and the [merge gate](../09-agent-identity.md).
 
