@@ -364,6 +364,88 @@ if [ "$got" = 2 ] && case "$err" in *"For a native task, move into its task work
 then echo "ok   exit 2  main-checkout denial names the Process ladder"
 else echo "FAIL exit $got (want 2, stderr '$err')  main-checkout denial names the Process ladder"; fail=1; fi
 
+# Field fixes 2026-11-26: Claude Code memory files are writable from any checkout.
+# The allowance is <passwd home>/.claude/projects/<one dir>/memory/..., with the
+# home taken from the password database, never from $HOME. The end-to-end cases
+# use the real home but only ask the hook for a decision: nothing is written
+# there. Every case that needs files under a home uses an injected home in $TMP
+# through memory_target(target, home=...), a parameter the hook never sets.
+REALHOME="$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+MEMP="crew64-guardtest-$$"
+memcase() { # expected(True|False) label target [home] [HOME override]
+  local exp="$1" label="$2" target="$3" home="${4:-}" envhome="${5:-}" got
+  got="$(env ${envhome:+HOME="$envhome"} python3 -I -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("guard", sys.argv[1])
+guard = importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+home = sys.argv[3] or None
+print(guard.memory_target(sys.argv[2], home=home))' "$HOOK" "$target" "$home" 2>&1)"
+  if [ "$got" = "$exp" ]; then echo "ok   memory_target=$got  $label"
+  else echo "FAIL memory_target=$got (want $exp)  $label"; fail=1; fi
+}
+if python3 -I -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("guard", sys.argv[1])
+guard = importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+sys.exit(1 if guard.inside_repository(sys.argv[2]) else 0)' "$HOOK" "$REALHOME" 2>/dev/null; then
+  run 0 "$M" Write "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/memory/note.md\",\"content\":\"hi\"}"       # main checkout
+  run 0 "$W" Edit  "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/memory/note.md\",\"old_string\":\"a\",\"new_string\":\"b\"}" # worktree
+  run 0 "$M" MultiEdit "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/memory/sub/MEMORY.md\",\"edits\":[]}"   # subdirectory of memory/
+  run 2 "$M" Write "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/other/x.md\",\"content\":\"hi\"}"          # not memory/
+  run 2 "$W" Write "{\"file_path\":\"$REALHOME/.claude/settings.json\",\"content\":\"{}\"}"                       # settings, not memory
+  run 2 "$M" Write "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/memory/../../x.md\",\"content\":\"hi\"}"   # .. segment
+  run 2 "$M" Write "{\"file_path\":\"$REALHOME/.claude/projects/memory/x.md\",\"content\":\"hi\"}"               # no project directory
+  run 2 "$M" Write "{\"file_path\":\"$REALHOME/.claude/projects/$MEMP/memory\",\"content\":\"hi\"}"              # memory/ itself, not a file in it
+else
+  echo "skip end-to-end memory cases: the real home is inside a repository"
+fi
+# $HOME steered into a repository: the hook ignores it (the real home does not match).
+mkdir -p "$M/fakehome/.claude/projects/p/memory"
+FAKEMEM="$M/fakehome/.claude/projects/p/memory/x.md"
+runenv HOME="$M/fakehome" 2 "$M" Write "{\"file_path\":\"$FAKEMEM\",\"content\":\"hi\"}"
+runenv HOME="$M/fakehome" 2 "$W" Write "{\"file_path\":\"$FAKEMEM\",\"content\":\"hi\"}"
+memcase False "HOME inside a repository, real home differs → not memory" "$FAKEMEM" "" "$M/fakehome"
+# Injected home in $TMP (outside any repository).
+H="$TMP/home"; mkdir -p "$H/.claude/projects/p/memory" "$H/.claude/projects/q" "$M/memdir"
+memcase True  "injected home: memory file" "$H/.claude/projects/p/memory/x.md" "$H"
+memcase True  "injected home: nested in memory/" "$H/.claude/projects/p/memory/a/b.md" "$H"
+memcase False "injected home: projects/<p>/other" "$H/.claude/projects/p/other/x.md" "$H"
+memcase False "injected home: .claude/settings.json" "$H/.claude/settings.json" "$H"
+memcase False "injected home: .. segment" "$H/.claude/projects/p/memory/../memory/x.md" "$H"
+memcase False "injected home: relative path" ".claude/projects/p/memory/x.md" "$H"
+memcase False "injected home: another home's memory" "$TMP/other/.claude/projects/p/memory/x.md" "$H"
+ln -s "$M/memdir" "$H/.claude/projects/q/memory"
+memcase False "injected home: memory is a symlink into a repository" "$H/.claude/projects/q/memory/x.md" "$H"
+mkdir -p "$TMP/elsewhere"; ln -s "$TMP/elsewhere" "$H/.claude/projects/r"
+memcase False "injected home: project dir is a symlink out of the home" "$H/.claude/projects/r/memory/x.md" "$H"
+# Codex review of 25803ea, blocker 1: a hard link under memory/ aliases a repository file.
+printf 'tracked\n' > "$M/tracked.md"; ln "$M/tracked.md" "$H/.claude/projects/p/memory/note.md"
+memcase False "injected home: memory file hard-linked to a repository file" "$H/.claude/projects/p/memory/note.md" "$H"
+printf 'mine\n' > "$H/.claude/projects/p/memory/existing.md"
+memcase True  "injected home: an existing memory file with one link" "$H/.claude/projects/p/memory/existing.md" "$H"
+# Blocker 2: resolution errors deny (ELOOP, ENOTDIR, a dangling symlink on the way).
+ln -s loop "$H/.claude/projects/p/memory/loop"
+memcase False "injected home: a symlink loop under memory/" "$H/.claude/projects/p/memory/loop/x.md" "$H"
+mkdir -p "$H/.claude/projects/f"; printf 'file\n' > "$H/.claude/projects/f/memory"
+memcase False "injected home: memory is a regular file" "$H/.claude/projects/f/memory/x.md" "$H"
+printf 'file\n' > "$H/.claude/projects/p/memory/plain"
+memcase False "injected home: an existing file used as a directory" "$H/.claude/projects/p/memory/plain/x.md" "$H"
+ln -s "$TMP/missing-target" "$H/.claude/projects/p/memory/dangling"
+memcase False "injected home: a dangling symlink on the way" "$H/.claude/projects/p/memory/dangling/x.md" "$H"
+memcase True  "injected home: new file in new subdirectories below memory/" "$H/.claude/projects/p/memory/new/dir/x.md" "$H"
+# Re-review of 05ec4c0: a target not in normal form is denied, so normalizing
+# cannot hide an existing file used as a directory (existing.md exists here).
+memcase False "injected home: existing file with a trailing separator" "$H/.claude/projects/p/memory/existing.md/" "$H"
+memcase False "injected home: existing file followed by /." "$H/.claude/projects/p/memory/existing.md/." "$H"
+memcase False "injected home: existing file followed by //" "$H/.claude/projects/p/memory/existing.md//" "$H"
+memcase False "injected home: a doubled separator inside a valid path" "$H/.claude/projects/p//memory/existing.md" "$H"
+git -C "$H" init -q 2>/dev/null
+memcase False "injected home that is itself a repository" "$H/.claude/projects/p/memory/x.md" "$H"
+rm -rf "$H/.git"
+# Real home, $HOME pointed elsewhere: the password database still decides.
+memcase True  "HOME pointed elsewhere, real-home memory file still allowed" "$REALHOME/.claude/projects/$MEMP/memory/x.md" "" "$TMP/home"
+memcase False "HOME pointed elsewhere: that HOME's memory is not allowed" "$H/.claude/projects/p/memory/x.md" "" "$H"
+
 printf '{"tool_name":"Write","cwd":"%s","tool_input":{}}' "$M" | ORCHESTRATOR_GUARD=off python3 -I "$HOOK" 2>/dev/null \
   && echo "ok   override ORCHESTRATOR_GUARD=off allows" || { echo "FAIL override"; fail=1; }
 exit $fail

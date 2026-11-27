@@ -12,6 +12,10 @@ Decision rules:
   Bash commands that write files or mutate Git.
 - Worktree: allow file write tools only when the real path of the target is
   inside the real path of cwd. Bash is not checked.
+- From either: the file write tools may target session scratch under /tmp
+  or $TMPDIR, and Claude Code memory files under
+  <home>/.claude/projects/<dir>/memory/, home from the password database
+  (scratch_target, memory_target). Bash is unchanged.
 - Malformed hook input (not JSON, not an object, no tool_name) is denied.
 
 Bash parsing: the whole command is tokenized once with shlex in POSIX mode
@@ -40,6 +44,7 @@ Exit 2 blocks the tool call and sends stderr back to the agent.
 """
 import json
 import os
+import pwd
 import re
 import shlex
 import subprocess
@@ -175,6 +180,96 @@ def scratch_target(target: str, env=None) -> bool:
     if inside_repository(unresolved) or inside_repository(real):
         return False
     return scratch_root_ok(real, root, custom)
+
+
+# Claude Code memory (field fixes 2026-11-26): <home>/.claude/projects/<one
+# project directory>/memory/, files at any depth below memory/. Memory files are
+# not repository content, so denying them protected nothing and only kept the
+# orchestrator from updating its memory.
+MEMORY_PARTS = (".claude", "projects")
+MEMORY_DIR = "memory"
+
+
+def _passwd_home():
+    """The home directory of the process's uid from the password database.
+    Never $HOME, so the environment cannot steer the allowance."""
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _memory_shape(path: str, base: str) -> bool:
+    """True when path is a file below base/.claude/projects/<dir>/memory/."""
+    prefix = base.rstrip(os.sep) + os.sep
+    if not path.startswith(prefix):
+        return False
+    parts = path[len(prefix):].split(os.sep)
+    return (len(parts) >= 5
+            and tuple(parts[:2]) == MEMORY_PARTS
+            and parts[2] not in ("", ".", "..")
+            and parts[3] == MEMORY_DIR
+            and all(part not in ("", ".", "..") for part in parts[4:]))
+
+
+def _resolve_existing(path: str):
+    """(real path, exists) with errors propagated (Codex review of 25803ea,
+    blocker 2). The longest existing prefix is resolved with
+    realpath(strict=True), so a symlink loop, a dangling symlink or a file
+    used as a directory raises. Only missing trailing components, the ones a
+    new file would create, are tolerated, and only below a directory. Works
+    on Python 3.13: no reliance on os.path.ALLOW_MISSING."""
+    head, tail = path, []
+    while True:
+        try:
+            os.lstat(head)  # ELOOP, ENOTDIR, EACCES and the like propagate
+            break
+        except FileNotFoundError:
+            parent = os.path.dirname(head)
+            if parent == head:
+                raise
+            tail.append(os.path.basename(head))
+            head = parent
+    real = os.path.realpath(head, strict=True)
+    if tail and not os.path.isdir(real):
+        raise NotADirectoryError(real)
+    return os.path.join(real, *reversed(tail)), not tail
+
+
+def memory_target(target, home=None) -> bool:
+    """True when target is a Claude Code memory file: absolute, no '..'
+    segment, both the unresolved and the real path below
+    <home>/.claude/projects/<one dir>/memory/, and neither path inside a
+    repository or git admin dir; existing components resolve strictly and an
+    existing target must have one link. home defaults to the password database entry
+    for this uid; the parameter exists for the unit test, and the hook never
+    sets it. Any error while checking denies."""
+    try:
+        if not isinstance(target, str) or not os.path.isabs(target):
+            return False
+        if ".." in target.split(os.sep):
+            return False
+        home = _passwd_home() if home is None else home
+        if not isinstance(home, str) or not os.path.isabs(home):
+            return False
+        # Only a target already in normal form: normalizing a trailing
+        # separator, a doubled separator or a "." segment away could hide an
+        # existing file used as a directory from the strict resolver
+        # (re-review of 05ec4c0).
+        if target != os.path.normpath(target):
+            return False
+        unresolved = target
+        real, exists = _resolve_existing(unresolved)
+        real_home = os.path.realpath(home, strict=True)
+        if not (_memory_shape(unresolved, os.path.normpath(home))
+                or _memory_shape(unresolved, real_home)):
+            return False
+        if not _memory_shape(real, real_home):
+            return False
+        # A second name for the inode could be a repository file (Codex review
+        # of 25803ea, blocker 1). Any stat error raises and denies.
+        if exists and os.stat(real).st_nlink > 1:
+            return False
+        return not (inside_repository(unresolved) or inside_repository(real))
+    except Exception:
+        return False
 
 GIT_DENY = {
     "commit", "add", "apply", "am", "cherry-pick", "merge", "rebase", "reset",
@@ -490,7 +585,7 @@ def decide(payload) -> int:
         return 0
     if tool in WRITE_TOOLS:
         target = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if isinstance(target, str) and scratch_target(target):
+        if isinstance(target, str) and (scratch_target(target) or memory_target(target)):
             return 0
     if in_worktree(cwd):
         if tool in WRITE_TOOLS:
