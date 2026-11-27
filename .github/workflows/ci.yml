@@ -1,0 +1,67 @@
+# The repository's verification list from AGENTS.md ("Verification for this
+# repository"). Branch protection requires the job named `ci`, so the job
+# name must stay exactly `ci` (decision 0011).
+#
+# `claude plugin validate .` is not run here: the Claude Code CLI is not on
+# the runner. It stays a local step for changes to plugin files.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - name: bash -n on every shell script under tools/
+        # NUL-separated names: git quotes special characters in its default
+        # output, and a quoted name would not open. A file that cannot be read
+        # fails the step instead of being skipped.
+        run: |
+          set -euo pipefail
+          list="$(mktemp)"
+          git ls-files -z tools > "$list"
+          n=0
+          while IFS= read -r -d '' f; do
+            first="$(head -n 1 -- "$f")" || { echo "cannot read $f" >&2; exit 1; }
+            case "$first" in
+              '#!'*bash*|'#!'*/sh*) bash -n -- "$f"; echo "bash -n ok  $f"; n=$((n + 1));;
+            esac
+          done < "$list"
+          [ "$n" -gt 0 ] || { echo "no shell scripts found under tools/" >&2; exit 1; }
+      - name: py_compile on the Python files under tools/
+        run: |
+          set -euo pipefail
+          list="$(mktemp)"
+          git ls-files -z 'tools/*.py' > "$list"
+          n=0
+          while IFS= read -r -d '' f; do
+            python3 -m py_compile "$f"; echo "py_compile ok  $f"; n=$((n + 1))
+          done < "$list"
+          [ "$n" -gt 0 ] || { echo "no Python files found under tools/" >&2; exit 1; }
+      - name: test-orchestrator-guard.sh
+        run: bash tools/hooks/test-orchestrator-guard.sh
+      - name: test-crew64-config.sh
+        run: bash tools/test-crew64-config.sh
+      - name: test-bot-scripts.sh
+        run: bash tools/bot/test-bot-scripts.sh
+      - name: test-crew64-enable.sh
+        run: bash tools/test-crew64-enable.sh
+      - name: test-orca-version-check.sh
+        run: bash tools/test-orca-version-check.sh
+      - name: check-ladder-docs.sh
+        run: bash tools/check-ladder-docs.sh
+      - name: test-check-ladder-docs.sh
+        run: bash tools/test-check-ladder-docs.sh

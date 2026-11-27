@@ -28,13 +28,25 @@ The push and pull request were therefore made with gh's device-code OAuth login 
 
 ## Merge gate
 
-Branch protection on `main` requires one approving review, with admin enforcement and no force pushes. Consequences:
+### Current gate (decision 0011, 2026-11-26)
+
+The approval rule below is superseded by [decision 0011](decisions/0011-machine-merge-gate.md). A pull request merges when all of these hold:
+
+- the `ci` check (`.github/workflows/ci.yml`, job `ci`) is green on its head;
+- the `codex-review` commit status on that same head is `success`, posted by the orchestrator with `tools/bot/review-status.sh` for the exact SHA the reviewer named;
+- the orchestrator has verified the worker's evidence.
+
+The bot merges and the owner is told of every merge (merge SHA and time on the pull request, the Orca workspace comment, the report). No human approval is required, and no agent approves a pull request to satisfy a review rule: a bot approval of agent work is not a review. Pull requests #28 to #30 were approved by the bot with no human and no CI, which is what this replaces. A repository whose branch protection still requires an approving review is misconfigured for this harness; the orchestrator reports it to the owner and does not work around it. The orchestrator changes this repository's branch protection to require `ci` and `codex-review` after decision 0011 merges.
+
+### Earlier gate (2026-10-22 to 2026-11-26, superseded)
+
+Kept as history. Branch protection on `main` required one approving review, with admin enforcement and no force pushes. Consequences:
 
 - The bot can push branches and open pull requests.
 - A write collaborator can merge once protection requirements pass. Merging without the required approval is expected to be blocked by branch protection; this is untested. Owner-only merging was procedure, not an enforced restriction, and is superseded by the standing authorization below.
 - The owner cannot merge without a reviewer approving the pull request.
 - Standing authorization (owner ruling, 2026-10-25): `Solvela-bot` performs merges and production deployments once the independent Codex review is clean and the orchestrator has verified it. Each one is reported to the owner in the task thread and recorded on the pull request with the merge SHA and time. The owner may revoke or narrow this at any time. See the [decision note](decisions/2026-10-25-agent-merge-and-deploy.md).
-- Self-approval limit: the bot cannot approve its own pull request, and main requires one approving review. The merge still waits for a human approval, and that is recorded on the pull request, not hidden. Whether a merge without approval is rejected remains untested.
+- Self-approval limit: the bot cannot approve its own pull request, and main required one approving review. The merge waited for a human approval, recorded on the pull request. In practice pull requests #28 to #30 were opened under the owner's login and approved by the bot, so neither a human nor a machine check was in the loop; decision 0011 replaces this rule. Whether a merge without approval is rejected remains untested.
 - First uses (2026-10-25): Solvela-bot merged sky64/floor PR 2 at 17:20:37Z (merge commit 1d0db41, unprotected base) and this repository's PR 10 at 18:22:40Z (merge commit 30ea1e3) after the owner's approving review; branch protection accepted the second. Details in the [decision note](decisions/2026-10-25-agent-merge-and-deploy.md).
 
 ## First gated pull request

@@ -12,7 +12,8 @@ bad() { echo "FAIL $1"; fail=1; }
 fresh() { # a pristine copy of the files the checker reads
   rm -rf "$COPY"; mkdir -p "$COPY"
   cp -r "$ROOT/agents" "$ROOT/config" "$ROOT/docs" "$ROOT/skills" "$ROOT/tools" \
-        "$ROOT/.claude-plugin" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md" "$ROOT/README.md" "$COPY/"
+        "$ROOT/.claude-plugin" "$ROOT/.github" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md" "$ROOT/README.md" "$COPY/"
+  mkdir -p "$COPY/.claude"; cp "$ROOT/.claude/crew64.json" "$COPY/.claude/"
 }
 check() { out="$(bash "$COPY/tools/check-ladder-docs.sh" 2>&1)"; rc=$?; }
 rejects() { # label : the checker must exit 1 and name the agent file
@@ -103,5 +104,29 @@ setdesc 'description: >-\n  text\n    deeper\n';    rejects "a deeper-indented d
 setdesc 'description: >-\n';             rejects "an empty description block → rejected"
 setdesc 'description: >-\n  Use it. "Quotes", colons: and # marks are plain text here.\n'; check
 [ "$rc" = 0 ] && ok "a canonical description with quotes, colons and hashes → accepted" || bad "canonical description: rc=$rc out=$out"
+
+# 13. Decision 0011: the merge-gate pins catch a reverted rule. Each mutation
+# must make the checker exit 1 and name the file and the phrase.
+names() { # label file phrase-fragment : exit 1 and the output names both
+  check
+  [ "$rc" = 1 ] && case "$out" in *"$2"*"$3"*) true;; *) false;; esac && ok "$1" || bad "$1: rc=$rc out=$out"
+}
+fresh; sed -i 's/No human approval is required to merge, and no agent approves/Agents approve/' "$COPY/AGENTS.md"
+names "AGENTS.md without the no-human-approval rule → rejected" AGENTS.md "No human approval is required to merge"
+fresh; printf '\n- Where branch protection requires an approving review the agent cannot give itself, the merge waits for a human approval.\n' >> "$COPY/AGENTS.md"
+names "AGENTS.md with the old human-approval wording restored → rejected" AGENTS.md "must not contain the merge waits for a human approval"
+fresh; sed -i 's/is misconfigured for this harness: report it to the owner and do not work around it/may be worked around/' "$COPY/skills/orchestrator/SKILL.md"
+names "skill without the misconfigured-protection rule → rejected" skills/orchestrator/SKILL.md "misconfigured for this harness"
+fresh; sed -i 's/the `codex-review` status on that same head is `success`/the review is clean/' "$COPY/skills/orchestrator/SKILL.md"
+names "skill without the codex-review gate → rejected" skills/orchestrator/SKILL.md "codex-review"
+fresh; sed -i 's/^  ci:$/  build:/' "$COPY/.github/workflows/ci.yml"
+names "workflow job renamed from ci → rejected" .github/workflows/ci.yml "ci:"
+fresh; sed -i 's/"bot_identity": true/"bot_identity": false/' "$COPY/.claude/crew64.json"
+names "this repository's bot_identity switched off → rejected" .claude/crew64.json "bot_identity"
+
+fresh; sed -i 's/Follow-ups alone never make a FINDINGS verdict/Any finding makes a FINDINGS verdict/' "$COPY/skills/orchestrator/SKILL.md"
+names "skill without the follow-ups-never-FINDINGS contract → rejected" skills/orchestrator/SKILL.md "Follow-ups alone never make a FINDINGS verdict"
+fresh; sed -i "s/git ls-files -z tools > /git ls-files tools > /" "$COPY/.github/workflows/ci.yml"
+names "workflow listing tools/ without -z → rejected" .github/workflows/ci.yml "git ls-files -z tools"
 
 exit $fail

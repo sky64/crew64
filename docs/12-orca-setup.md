@@ -19,6 +19,7 @@ Verified on this machine on 2026-10-27 from a Claude session inside an Orca term
 | Plugin in an Orca-launched session | Untested |
 | Orca environment recipes as a write boundary | Untested |
 | Automatic Codex review as an Orca automation | Not built |
+| CI and the bot token | `.github/workflows/ci.yml` (job `ci`) added by decision 0011. On 2026-11-26 GitHub refused the bot's push of that file: "refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope". The `skybot64` token has scope `repo` only, so a change to a workflow file cannot be pushed by the bot until the owner adds the `workflow` scope (a credential change). The first green and red runs are recorded on the pull request that adds the workflow |
 
 ## Bot identity verification
 
@@ -34,11 +35,15 @@ Recorded when `tools/bot/install-bot-identity.sh` was run on this machine; see t
 
 ## Review and merge flow
 
-1. The implementer works in an Orca worktree and commits as the bot.
-2. The orchestrator starts a Codex reviewer as an Orca worker with base and head SHAs, changed files, acceptance criteria, and check results, and waits on the Run inbox.
-3. With a clean review, the implementer pushes and opens the pull request as the bot with `gh-bot`.
-4. The owner approves the pull request. Branch protection on `main` requires that approval and the bot cannot give it.
-5. The orchestrator merges as the bot with `gh-bot pr merge`, reports to the owner, updates the Orca workspace comment, and records the merge SHA and time on the pull request, per the [standing authorization](decisions/2026-10-25-agent-merge-and-deploy.md).
+The merge gate is machines, and the owner is told ([decision 0011](decisions/0011-machine-merge-gate.md)).
+
+1. The implementer works in an Orca worktree and commits as the bot; the branch is pushed and the pull request opened as the bot with `gh-bot`.
+2. CI (`.github/workflows/ci.yml`, job `ci`) runs the repository's verification list on the pull request's head.
+3. The orchestrator starts a Codex reviewer as an Orca worker with base and head SHAs, changed files, acceptance criteria, and check results, then ends its turn; Orca wakes it with the reviewer's `worker_done`.
+4. The orchestrator records the verdict on the reviewed head with `tools/bot/review-status.sh <owner/repo> <full head sha> clean|findings "<description>"`, which posts the `codex-review` commit status (`success` or `failure`). It records `clean` only for the exact SHA the reviewer named. A new push has no `codex-review` status until its own review is recorded.
+5. With `ci` green and `codex-review` `success` on the same head, and the worker's evidence verified, the orchestrator merges as the bot with `gh-bot pr merge`, reports to the owner, updates the Orca workspace comment, and records the merge SHA and time on the pull request, per the [standing authorization](decisions/2026-10-25-agent-merge-and-deploy.md). No human approval is required, and no agent approves the pull request.
+
+Branch protection on `main` of this repository is to require the `ci` check and the `codex-review` status instead of an approving review; the orchestrator changes it after decision 0011 merges. Until then the old approval rule is in force, and this repository is misconfigured for the gate above: the orchestrator reports that and does not work around it. Not yet verified: a run of the gate end to end, and branch protection rejecting a merge whose `ci` or `codex-review` is missing.
 
 ## Model ladder routing
 

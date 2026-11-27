@@ -159,7 +159,7 @@ need skills/orchestrator/SKILL.md "Runtime:"
 need skills/orchestrator/SKILL.md "outside that floor are out of scope"
 need docs/05-delegation.md "Runtime:"
 need AGENTS.md "Python 3.13+"
-need .claude-plugin/plugin.json '"version": "0.9.0"'
+need .claude-plugin/plugin.json '"version": "0.9.1"'
 # Field fixes 2026-11-18: briefs travel by --spec-file from the scratchpad.
 need skills/orchestrator/SKILL.md "--spec-file"
 need skills/orchestrator/SKILL.md "the guard allows Write and Edit there"
@@ -328,6 +328,60 @@ need skills/orchestrator/SKILL.md "shipped default \`claude-fable-5-2\`"
 forbid skills/orchestrator/SKILL.md "claude-fable-5-1"
 need skills/orchestrator/SKILL.md "Agent roles (Orca)"
 need docs/decisions/0010-field-fixes-2026-11-26.md "no such numbers exist yet"
+
+# Decision 0011: the merge gate is machines (ci and codex-review on the same
+# head), the owner is told, no human approval, no agent approval, and a
+# protection that still requires an approving review is reported, not worked around.
+need AGENTS.md 'the `ci` check is green on its head; the `codex-review` status on that same head is `success`'
+need AGENTS.md "No human approval is required to merge, and no agent approves a pull request to satisfy a review rule."
+need AGENTS.md "A bot approval of agent work is not a review."
+need AGENTS.md "is misconfigured for this harness: the orchestrator reports it to the owner and does not work around it"
+need AGENTS.md "tools/bot/review-status.sh"
+need AGENTS.md "no review required: <reason>"
+need AGENTS.md "reports the missing CI as a gap in the completion report"
+forbid AGENTS.md "the merge waits for a human approval"
+forbid AGENTS.md "does not replace human approval"
+need skills/orchestrator/SKILL.md 'the `ci` check is green on its head; the `codex-review` status on that same head is `success`'
+need skills/orchestrator/SKILL.md "No human approval is required, and no agent approves a pull request to satisfy a review rule."
+need skills/orchestrator/SKILL.md "A bot approval of agent work is not a review."
+need skills/orchestrator/SKILL.md "is misconfigured for this harness: report it to the owner and do not work around it"
+need skills/orchestrator/SKILL.md "tools/bot/review-status.sh"
+need skills/orchestrator/SKILL.md "only for the exact SHA the reviewer named in its verdict line"
+need skills/orchestrator/SKILL.md "no review required: <reason>"
+need skills/orchestrator/SKILL.md "Report the missing CI as a gap in the completion report; do not block on it."
+need skills/orchestrator/SKILL.md 'the "allowance spent" question'
+need docs/05-delegation.md "no human approval is required, and no agent approves a pull request to satisfy a review rule"
+need docs/05-delegation.md "codex-review"
+need docs/09-agent-identity.md "superseded by [decision 0011]"
+need docs/12-orca-setup.md "review-status.sh"
+forbid docs/12-orca-setup.md "The owner approves the pull request."
+forbid docs/12-orca-setup.md "waits on the Run inbox"
+forbid README.md "the owner approves where branch protection requires it"
+forbid README.md "Human approval remains manual"
+forbid CLAUDE.md "human approval remains separate where branch protection requires it"
+forbid docs/11-plugin-install.md "(one approving review, admin enforcement, no force pushes)"
+need docs/decisions/0011-machine-merge-gate.md "does not prove that a review happened"
+need docs/decisions/0011-machine-merge-gate.md "## How to revert"
+need .github/workflows/ci.yml "  ci:"
+# Codex review of 74519d5, blocker 2: the verdict contract, so follow-ups alone never post failure.
+need AGENTS.md "VERDICT: CLEAN <full reviewed sha>"
+need AGENTS.md "VERDICT: FINDINGS <full reviewed sha>"
+need AGENTS.md "Follow-ups alone never make a FINDINGS verdict"
+need skills/orchestrator/SKILL.md "Every reviewer brief, first review and re-review, requires the verdict contract"
+need skills/orchestrator/SKILL.md "means no blocker remains (follow-ups may still be listed)"
+need skills/orchestrator/SKILL.md "means at least one blocker remains"
+need skills/orchestrator/SKILL.md "Follow-ups alone never make a FINDINGS verdict"
+need docs/decisions/0011-machine-merge-gate.md "VERDICT: CLEAN <full reviewed sha>"
+need docs/decisions/0011-machine-merge-gate.md "Follow-ups alone never make a FINDINGS verdict"
+# Codex review of 74519d5, blocker 1: CI reads file names NUL-separated and fails on an unreadable one.
+need .github/workflows/ci.yml "git ls-files -z tools"
+need .github/workflows/ci.yml "while IFS= read -r -d '' f; do"
+need .github/workflows/ci.yml 'cannot read $f'
+forbid .github/workflows/ci.yml "done < <(git ls-files tools)"
+need .github/workflows/ci.yml "contents: read"
+need .github/workflows/ci.yml "claude plugin validate ."
+need tools/bot/review-status.sh "context=codex-review"
+need .claude/crew64.json '"bot_identity": true'
 
 # Decision 0005: the defaults file validates, and every model id it ships
 # appears in the docs/05 ladder table, so the table and the file cannot drift.
