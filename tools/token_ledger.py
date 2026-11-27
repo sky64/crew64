@@ -29,15 +29,20 @@ KINDS = ("input", "cache_read", "cache_creation", "output")
 ROLES = ("orchestrator", "worker", "other")
 AGENTS = ("claude", "codex", "dsh")
 ORCA_PROGRAMS = frozenset({"orca", "orca-ide", "orca-dev"})
-# A program word that is one shell variable and nothing else: $NAME, ${NAME}, ${NAME:-default}.
-PROGRAM_VARIABLE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\})\Z")
+# A program word that is one shell variable and nothing else: $NAME, ${NAME}, ${NAME:-default},
+# ${NAME:=default}; any other operator (${NAME:+x}, ${NAME%x} ...) gives another value.
+PROGRAM_VARIABLE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=][^}]*)?\})\Z")
 ORCA_VARIABLE_PART = "orca"  # e.g. ORCA_CLI_COMMAND, the variable this repository's scripts use
 LAUNCH_WORDS = ["orchestration", "worker-start"]
 LAUNCH_HINT = "worker"  # cheap pre-check; every launch command contains it
 HELP_FLAG = "--help"
 BLANKS = " \t\r"
+NEWLINE = "\n"
 WORD_END = BLANKS + "\n;&|()<>"
-COMMAND_END = ";&|()"  # and newline
+CONTROL_CHARS = ";&|()"
+OPERATORS = (";;&", ";;", ";&", "&&", "||", "|&", ";", "&", "|", "(", ")")  # longest first
+SEPARATORS = frozenset({";", "&", NEWLINE})
+CASE_ENDS = (";;", ";&", ";;&")
 REDIRECTS = ("<<<", "<<-", "<<", "&>>", "&>", ">>", "<&", ">&", "<>", ">|", "<", ">")  # longest first
 HEREDOC_STRIP_TABS = "<<-"
 HERE_STRING = "<<<"
@@ -45,11 +50,28 @@ HEREDOC_OPERATORS = frozenset({"<<", HEREDOC_STRIP_TABS})
 GROUP_CLOSE = {"(": ")", "{": "}"}
 DOUBLE_QUOTE_ESCAPE = re.compile(r'\\([$`"\\\n])')
 ANSI_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
-RESERVED_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"})
 TIME_POSIX_FLAG = "-p"
+# Reserved words that open a compound command at command start, and the parser method for each.
+COMPOUND_COMMANDS = {"{": "brace_group", "if": "if_command", "while": "loop_command",
+                     "until": "loop_command", "for": "for_command", "select": "select_command",
+                     "case": "case_command", "[[": "conditional", "function": "function_keyword",
+                     "coproc": "coproc_command"}
+BODY_COMMANDS = frozenset(COMPOUND_COMMANDS) - {"function", "coproc"}
+CLOSING_WORDS = frozenset({"}", "then", "else", "elif", "fi", "do", "done", "esac", "in"})
+# NAME=, NAME+= or NAME[subscript]=; groups: name, subscript, plus.
+ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^]]*\])?(\+?)=")
+ARRAY_PREFIX = re.compile(ASSIGNMENT.pattern + r"\Z")  # followed by an unquoted ( : an array value
+DECLARED_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[|\+?=|\Z)")
+ARRAY_EXPANSION = re.compile(r'(")?\$\{([A-Za-z_][A-Za-z0-9_]*)\[([@*])\]\}(?(1)")\Z')
+DECLARATIONS = frozenset({"declare", "typeset", "local", "export", "readonly"})
+LOCAL_DECLARATIONS = frozenset({"declare", "typeset", "local"})  # local inside a function, unless -g
+GLOBAL_FLAG = re.compile(r"-[A-Za-z]*g[A-Za-z]*\Z")
+STATE_RESETS = frozenset({"eval", "source", ".", "trap"})  # may change any variable or function
+NOEXEC_FLAG = re.compile(r"-[A-Za-z]*n[A-Za-z]*\Z")
+IFS_NAME = "IFS"
+MAX_FUNCTION_CALLS = 1000  # per script; a call beyond it is not followed
 SHELLS = frozenset({"bash", "sh", "zsh"})
 SHELL_SCRIPT_FLAGS = frozenset({"-c", "-lc"})
-ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 ORCA_LINE = "You are working inside Orca"
 WORKER_LINE = "You are a dispatched worker"
 ORCA_LINE_MAX_OFFSET = 120  # a real dispatch prompt opens with the Orca line
@@ -63,43 +85,80 @@ UNKNOWN = "(unknown)"
 PCT_DIGITS = 1
 
 EPILOG = """\
-Roles (first rule that holds): orchestrator = the session executed an Orca
-launch (rule below); worker = a user turn is an Orca dispatch prompt
-(it opens with "You are working inside Orca" and says "You are a dispatched
-worker" within the first lines; a prompt that only quotes the phrase later in
-other text does not count); other. A subagent file takes the role and task of
-its parent session. task = last path component of the session cwd.
+Roles (first rule that holds): worker = a user turn is an Orca dispatch
+prompt (it opens with "You are working inside Orca" and says "You are a
+dispatched worker" within the first lines; a prompt that only quotes the
+phrase later in other text does not count); orchestrator = the session
+executed an Orca launch (rule below); other. The dispatch prompt comes first
+because it is structural evidence, while the launch test reads shell text, so
+no reading error of the launch test can move a dispatched worker's tokens into
+the orchestrator share; a dispatched worker that starts workers of its own is a
+worker. A subagent file takes the role and task of its parent session.
+task = last path component of the session cwd.
 
 Launch rule: only shell tool calls are read (Claude: tool_use "Bash",
 input.command; Codex: event_msg item_completed with item type
 "CommandExecution", command [bash, -lc, script]; dsh: tool/call "bash",
-arguments.command). The script is read by a small shell word scanner, not
-run: single quotes, double quotes (a backslash escapes), $'...' and backslash
-escapes are honoured; backslash-newline joins lines; adjacent quoted and plain
-parts are one word. "#" at the start of a word outside quotes is a comment to
-the end of the line ("a#b" is one word). Outside quotes only, ; & && | || ( )
-and newline end a simple command; a quoted ";" is an argument. A redirection
-(< > >> <& >& <> >| &> &>> with an optional fd number) does not end it; the
-word after it is its target, never the program. A here-document (<< or <<-,
-outside quotes and comments) skips the lines after its line up to the
-delimiter line, or to the end of the script when it is missing; <<< takes one
-word. A simple command is a launch when, after the unquoted reserved words if
-then else elif do while until ! { time and then any VAR=value words, its
-program is orca, orca-ide or orca-dev by basename, or is one shell variable
-whose name contains "orca" in any case ($ORCA_CLI_COMMAND,
-${ORCA_CLI_COMMAND:-orca}), unquoted or in double quotes, its next words are
-"orchestration worker-start", and no word is --help. The variable's value is
-not known to the ledger; the subcommand words decide. A single-quoted
-'$ORCA_CLI_COMMAND', a variable with any other name, or a variable that is
-only part of the program word is not a launch. Text in other tools' arguments
-or in a quoted argument of another program is not a launch. A script with an
-unterminated quote, $(, ${, <( or backtick cannot be tokenized and has no
-launch. Limits, by design: command substitution ($(...) and backticks) and
-process substitution stay part of their word and are never read as commands
-(their quotes, comments and here-documents are tracked only to find their end,
-so operators inside them do not end the outer command); a nested shell
-(bash -c '...') and wrapper programs (env, sudo, timeout, xargs, exec) are not
-followed; a function body is read like any other command.
+arguments.command). The script is parsed by a small reader of the Bash
+grammar, not run. Words: single quotes, double quotes (a backslash escapes),
+$'...' and backslash escapes are honoured; backslash-newline joins lines;
+adjacent quoted and plain parts are one word; "#" at the start of a word
+outside quotes is a comment to the end of the line ("a#b" is one word).
+Outside quotes only, ; & && | || |& ( ) ;; ;& ;;& and newline are operators;
+a quoted ";" is an argument. A redirection (< > >> <& >& <> >| &> &>> with an
+optional fd number) is not a word and its target is never the program. A
+here-document (<< or <<-) skips the lines after its line up to the delimiter
+line, or to the end of the script when it is missing; <<< takes one word.
+Structure: pipelines, lists, { } and ( ) groups, if, while, until, for (also
+for ((...)) and a { } body), select, case (patterns are not commands), [[ ]]
+and (( )) (their words are never commands), function definitions and
+coproc are parsed; reserved words count only at the start of a command.
+The commands are then read in source order:
+  - A simple command is a launch when, after any NAME=value, NAME+=value or
+    NAME[i]=value words, its program is orca, orca-ide or orca-dev by
+    basename, or is one shell variable whose name contains "orca" in any case
+    ($ORCA_CLI_COMMAND, ${ORCA_CLI_COMMAND:-orca}; a default with :- or := only),
+    unquoted or in double quotes, its next words are "orchestration
+    worker-start", and no word is --help. The variable's value is not known
+    unless the script assigned it a literal value earlier, which is then the
+    program. A single-quoted '$ORCA_CLI_COMMAND', a variable with any other
+    name, or a variable that is only part of the program word is not a launch.
+  - Arrays: an unquoted ( right after NAME=, NAME+= or NAME[...]= opens an
+    array value; up to its matching ) it is one assignment word (quote,
+    comment and newline aware), never commands, also after declare, typeset,
+    local, export and readonly. Its elements are remembered by name, with +=
+    appending, the last assignment before a command counting, a local array of
+    a function ending with the call, and a prefix assignment or one in a
+    subshell, pipeline or background job not persisting. A command whose
+    program word is "${NAME[@]}", ${NAME[@]} or ${NAME[*]} is read as the
+    remembered elements followed by its other words (unquoted expansion splits
+    elements at blanks); "${NAME[*]}" is one word, the elements joined by a
+    blank, as in bash. An array is forgotten (its expansion is then no launch)
+    when the script names it in any other way than reading it whole, for
+    example cmd[0]=x, cmd=x, unset, read -a, (( )), or after eval, source, .,
+    trap or a program word that is itself an unknown expansion; elements
+    written as [i]=value are not followed.
+  - Functions: NAME() body and function NAME [()] body define a function; the
+    body does not run at its definition. A later simple command whose program
+    word is that name (quoted or not) runs the body, read by the same rules,
+    following one function calling another, with recursion and more than
+    1000 calls per script not followed. A function shadows the Orca CLI of the
+    same name. unset and redefinition apply; a function defined in a subshell
+    or pipeline does not persist.
+  - set -n or set -o noexec, and shopt -s expand_aliases, end the reading:
+    nothing after them counts.
+Text in other tools' arguments or in a quoted argument of another program is
+not a launch. A script with an unterminated quote, $(, ${, <(, backtick,
+array value or compound command, or another syntax error, cannot be read and
+has no launch.
+Limits: the launch test is static. It does not evaluate control flow (a launch
+in a branch not taken, in a loop that never runs, or after exit still counts),
+nor PATH or hash changes. It does not follow command substitution ($(...) and
+backticks), process substitution, here-document bodies, eval, source, trap, a
+nested shell (bash -c '...'), a scalar variable or "$@" that holds the whole
+command, or wrapper programs (env, sudo, timeout, xargs, exec, command,
+coproc, nohup); their quotes, comments and here-documents are tracked only to
+find their end. Each of those is a missed launch, never an invented one.
 
 Date range (UTC days, both ends inclusive):
   Claude and dsh are filtered per call, by the call's own timestamp.
@@ -203,7 +262,8 @@ def text_parts(content):
 # Reads a shell script far enough to find its simple commands; it does not run or
 # expand anything. Every rule is stated in --help under "Launch rule".
 
-Word = collections.namedtuple("Word", "text raw quoted")  # text: quotes removed; raw: as written
+Word = collections.namedtuple("Word", "text raw quoted array", defaults=(None,))  # text: quotes removed; raw: as written
+ArrayValue = collections.namedtuple("ArrayValue", "name indexed append elements")  # elements: Words
 
 
 def close_single(s, i):
@@ -335,7 +395,11 @@ def unescape(match):
 
 
 def read_word(s, i):
-    """(Word, end) of the word at i; a <( or >( at its start is process substitution."""
+    """(Word, end) of the word at i; a <( or >( at its start is process substitution.
+
+    An unquoted ( right after NAME=, NAME+= or NAME[...]= opens an array value: everything
+    up to the matching ) belongs to this one word.
+    """
     start, parts, quoted = i, [], False
     if s[i] in "<>":
         i = close_group(s, i + 2, "(")
@@ -344,7 +408,43 @@ def read_word(s, i):
         i, text, piece_quoted = word_piece(s, i)
         parts.append(text)
         quoted = quoted or piece_quoted
-    return Word("".join(parts), s[start:i], quoted), i
+    prefix = ARRAY_PREFIX.match(s[start:i]) if s.startswith("(", i) else None
+    if prefix is None:
+        return Word("".join(parts), s[start:i], quoted), i
+    elements, i = read_array(s, i + 1)
+    if i < len(s) and s[i] not in WORD_END:
+        raise ValueError("text after an array value")
+    value = ArrayValue(prefix.group(1), bool(prefix.group(2)), bool(prefix.group(3)), elements)
+    return Word("".join(parts), s[start:i], quoted, value), i
+
+
+def read_array(s, i):
+    """(element Words, end) of an array value whose body starts at i, up to its closing )."""
+    elements = []
+    while i < len(s):
+        c = s[i]
+        if c in BLANKS or c == NEWLINE:
+            i += 1
+        elif s.startswith("\\\n", i):
+            i += 2
+        elif c == "#":
+            i = line_end(s, i)
+        elif c == ")":
+            return tuple(elements), i + 1
+        elif c in WORD_END:
+            raise ValueError("operator inside an array value")
+        else:
+            word, i = read_word(s, i)
+            if word.array is not None:
+                raise ValueError("array value inside an array value")
+            elements.append(word)
+    raise ValueError("unterminated array value")
+
+
+def line_end(s, i):
+    """Index of the newline that ends the line holding i, or the end of s."""
+    end = s.find(NEWLINE, i)
+    return len(s) if end < 0 else end
 
 
 def skip_heredoc_bodies(s, i, heredocs):
@@ -358,20 +458,33 @@ def skip_heredoc_bodies(s, i, heredocs):
     return i
 
 
-class ShellScanner:
-    """Split a shell script into its simple commands, each a list of Words.
+Token = collections.namedtuple("Token", "kind value")  # kind WORD (value a Word), OP (a str) or END
+WORD, OP, END = "word", "op", "end"
+END_TOKEN = Token(END, None)
 
-    Redirect targets, here-string words and file descriptor numbers are left out.
-    Raises ValueError when the script cannot be tokenized.
+
+class Lexer:
+    """The words and control operators of a shell script, one token at a time.
+
+    A redirection never reaches the parser: the operator, an fd number before it and its
+    target are consumed here, and the target's text is kept in side for the variable
+    bookkeeping, as are here-document bodies, which are skipped at the end of their line.
     """
 
     def __init__(self, script):
         self.s, self.i = script, 0
-        self.commands, self.words = [], []
-        self.heredocs = []  # (delimiter, strip_tabs) whose bodies start after this line
-        self.expect = None  # the redirect operator whose target word comes next
+        self.heredocs, self.side, self.peeked = [], [], None
 
-    def scan(self):
+    def peek(self):
+        if self.peeked is None:
+            self.peeked = self.read()
+        return self.peeked
+
+    def take(self):
+        token, self.peeked = self.peek(), None
+        return token
+
+    def read(self):
         s = self.s
         while self.i < len(s):
             c = s[self.i]
@@ -379,62 +492,550 @@ class ShellScanner:
                 self.i += 1
             elif s.startswith("\\\n", self.i):
                 self.i += 2
-            elif c == "#":  # between words, so at the start of one
-                end = s.find("\n", self.i)
-                self.i = len(s) if end < 0 else end
-            elif c == "\n":
-                self.end_command()
-                self.i = skip_heredoc_bodies(s, self.i + 1, self.heredocs)
-                self.heredocs = []
+            elif c == "#":  # between tokens, so at the start of a word
+                self.i = line_end(s, self.i)
+            elif c == NEWLINE:
+                self.skip_bodies()
+                return Token(OP, NEWLINE)
             elif s.startswith("&>", self.i) or (c in "<>" and s[self.i + 1:self.i + 2] != "("):
                 self.redirect()
-            elif c in COMMAND_END:
-                self.end_command()
-                self.i += 1
+            elif c in CONTROL_CHARS:
+                op = next(op for op in OPERATORS if s.startswith(op, self.i))
+                self.i += len(op)
+                return Token(OP, op)
             else:
-                self.word()
-        self.end_command()
-        return [words for words in self.commands if words]
+                word, self.i = read_word(s, self.i)
+                if not (word.raw.isdigit() and s[self.i:self.i + 1] in ("<", ">")):
+                    return Token(WORD, word)  # an fd number before a redirect is not a word
+        return END_TOKEN
 
-    def end_command(self):
-        if self.expect is not None:
-            raise ValueError("redirect without a target")
-        self.commands.append(self.words)
-        self.words = []
+    def skip_bodies(self):
+        start = self.i + 1
+        self.i = skip_heredoc_bodies(self.s, start, self.heredocs)
+        if self.heredocs:
+            self.side.append(self.s[start:self.i])
+        self.heredocs = []
 
     def redirect(self):
-        if self.expect is not None:
+        s = self.s
+        op = next(op for op in REDIRECTS if s.startswith(op, self.i))
+        self.i += len(op)
+        while s.startswith("\\\n", self.i) or s[self.i:self.i + 1] in tuple(BLANKS):
+            self.i += 2 if s[self.i] == "\\" else 1
+        if self.i >= len(s) or (s[self.i] in WORD_END and not s.startswith(("<(", ">("), self.i)):
             raise ValueError("redirect without a target")
-        self.expect = next(op for op in REDIRECTS if self.s.startswith(op, self.i))
-        self.i += len(self.expect)
+        word, self.i = read_word(s, self.i)
+        self.side.append(word.raw)
+        if op in HEREDOC_OPERATORS:
+            self.heredocs.append((word.text, op == HEREDOC_STRIP_TABS))
 
-    def word(self):
-        word, self.i = read_word(self.s, self.i)
-        operator, self.expect = self.expect, None
-        if operator in HEREDOC_OPERATORS:
-            self.heredocs.append((word.text, operator == HEREDOC_STRIP_TABS))
-        elif operator is None and not (word.raw.isdigit() and self.s[self.i:self.i + 1] in ("<", ">")):
-            self.words.append(word)  # a target or a file descriptor number is not a word
+    def try_arithmetic(self):
+        """After a ( at command start: the text of a (( ... )) command, else None (a subshell)."""
+        s, i = self.s, self.i
+        if not s.startswith("(", i):
+            return None
+        inner = close_group(s, i + 1, "(", commands=False)
+        if not s.startswith(")", inner):
+            return None
+        self.i = inner + 1
+        return s[i:self.i]
+
+    def conditional(self):
+        """After [[: the text up to and including the closing ]] word; nothing in it is a command."""
+        s, start = self.s, self.i
+        while self.i < len(s):
+            c = s[self.i]
+            if c in BLANKS or c == NEWLINE:
+                self.i += 1
+            elif s.startswith("\\\n", self.i):
+                self.i += 2
+            elif c == "#":
+                self.i = line_end(s, self.i)
+            elif c == ";":
+                raise ValueError("; inside [[ ]]")
+            elif c in WORD_END:
+                self.i += 1  # && || ! ( ) < > are operators of the expression
+            else:
+                word, self.i = read_word(s, self.i)
+                if word.raw == "]]":
+                    return s[start:self.i]
+        raise ValueError("unterminated [[")
 
 
-def program_index(words):
-    """Index of the program: after reserved words, then NAME=value words."""
-    i = 0
-    while i < len(words) and not words[i].quoted and words[i].text in RESERVED_WORDS:
-        i += 1
-        if words[i - 1].text == "time" and i < len(words) and words[i].raw == TIME_POSIX_FLAG:
-            i += 1
-    while i < len(words) and ASSIGNMENT.match(words[i].raw):
-        i += 1
-    return i
+# Parsed items, in source order. Cmd: a simple command; Text: words that are expanded but
+# never run (for and case words, [[ ]], (( )), redirect targets, here-document bodies);
+# Func: a function definition; Sub: a subshell, whose variables and functions do not persist.
+Cmd = collections.namedtuple("Cmd", "words side")
+Text = collections.namedtuple("Text", "raw")
+Func = collections.namedtuple("Func", "name body")
+Sub = collections.namedtuple("Sub", "items")
 
 
-def is_launch(words):
-    start = program_index(words)
-    if start >= len(words) or not is_orca_program(words[start]):
+def is_assignment(word):
+    return word.array is not None or ASSIGNMENT.match(word.raw) is not None
+
+
+class ShellParser:
+    """A recursive-descent reader of the Bash grammar; raises ValueError on a syntax error."""
+
+    def __init__(self, script):
+        self.lex = Lexer(script)
+
+    def parse(self):
+        items = self.command_list(allow_empty=True)
+        if self.lex.peek().kind != END:
+            raise ValueError("unexpected token")
+        return items
+
+    def is_word(self, token, *raws):
+        return token.kind == WORD and not token.value.quoted and token.value.raw in raws
+
+    def expect_word(self, raw):
+        if not self.is_word(self.lex.take(), raw):
+            raise ValueError("expected " + raw)
+
+    def expect_op(self, op):
+        if self.lex.take() != Token(OP, op):
+            raise ValueError("expected " + op)
+
+    def skip_newlines(self):
+        while self.lex.peek() == Token(OP, NEWLINE):
+            self.lex.take()
+
+    def at_stop(self, stops):
+        token = self.lex.peek()
+        if token.kind == OP:
+            return token.value in stops
+        return token.kind == END or self.is_word(token, *stops)
+
+    def flush_side(self):
+        items, self.lex.side = [Text(raw) for raw in self.lex.side], []
+        return items
+
+    def command_list(self, stops=(), allow_empty=False):
+        """Commands up to a stop word or operator at command start (or the end), which stays unread."""
+        items, count = [], 0
+        self.skip_newlines()
+        while not self.at_stop(stops):
+            part, count = self.and_or(), count + 1
+            token = self.lex.peek()
+            items.extend([Sub(tuple(part))] if token == Token(OP, "&") else part)
+            if token.kind != OP or token.value not in SEPARATORS:
+                break
+            self.lex.take()
+            self.skip_newlines()
+            items.extend(self.flush_side())
+        if not count and not allow_empty:
+            raise ValueError("empty command list")
+        return items
+
+    def and_or(self):
+        items = self.pipeline()
+        while self.lex.peek() in (Token(OP, "&&"), Token(OP, "||")):
+            self.lex.take()
+            self.skip_newlines()
+            items = items + self.pipeline()
+        return items
+
+    def pipeline(self):
+        while self.is_word(self.lex.peek(), "!", "time"):
+            if self.lex.take().value.raw == "time" and self.is_word(self.lex.peek(), TIME_POSIX_FLAG):
+                self.lex.take()
+        parts = [self.command()]
+        while self.lex.peek() in (Token(OP, "|"), Token(OP, "|&")):
+            self.lex.take()
+            self.skip_newlines()
+            parts.append(self.command())
+        return parts[0] if len(parts) == 1 else [Sub(tuple(part)) for part in parts]
+
+    def command(self):
+        token = self.lex.peek()
+        if token == Token(OP, "("):
+            self.lex.take()
+            return self.paren()
+        if token.kind != WORD:
+            raise ValueError("expected a command")
+        if self.is_word(token, *COMPOUND_COMMANDS):
+            self.lex.take()
+            return getattr(self, COMPOUND_COMMANDS[token.value.raw])(token.value.raw)
+        if self.is_word(token, *CLOSING_WORDS):
+            raise ValueError("unexpected " + token.value.raw)
+        return self.simple_command()
+
+    def paren(self):
+        arithmetic = self.lex.try_arithmetic()
+        if arithmetic is not None:
+            return [Text(arithmetic)]
+        body = self.command_list((")",))
+        self.expect_op(")")
+        return [Sub(tuple(body))]
+
+    def brace_group(self, _keyword="{"):
+        body = self.command_list(("}",))
+        self.expect_word("}")
+        return body
+
+    def take_keyword(self):
+        token = self.lex.take()
+        return token.value.raw if token.kind == WORD and not token.value.quoted else None
+
+    def if_command(self, keyword):
+        items = []
+        while keyword in ("if", "elif"):
+            items += self.command_list(("then",))
+            self.expect_word("then")
+            items += self.command_list(("elif", "else", "fi"))
+            keyword = self.take_keyword()
+        if keyword == "else":
+            items += self.command_list(("fi",))
+            keyword = self.take_keyword()
+        if keyword != "fi":
+            raise ValueError("expected fi")
+        return items
+
+    def loop_command(self, _keyword):
+        return self.command_list(("do",)) + self.do_group(allow_brace=False)
+
+    def do_group(self, allow_brace):
+        if allow_brace and self.is_word(self.lex.peek(), "{"):
+            self.lex.take()
+            return self.brace_group()
+        self.expect_word("do")
+        body = self.command_list(("done",))
+        self.expect_word("done")
+        return body
+
+    def for_command(self, keyword):
+        token = self.lex.take()
+        if keyword == "for" and token == Token(OP, "("):
+            arithmetic = self.lex.try_arithmetic()
+            if arithmetic is None:
+                raise ValueError("expected (( after for")
+            items = [Text(arithmetic)]
+        elif token.kind == WORD:
+            items = self.word_list()
+        else:
+            raise ValueError("expected a name after " + keyword)
+        if self.lex.peek() == Token(OP, ";"):
+            self.lex.take()
+        self.skip_newlines()
+        return items + self.do_group(allow_brace=True)
+
+    def select_command(self, keyword):
+        return self.for_command(keyword)
+
+    def word_list(self):
+        """The optional 'in words' of for and select, up to its ; or newline (left unread)."""
+        self.skip_newlines()
+        if not self.is_word(self.lex.peek(), "in"):
+            return []
+        self.lex.take()
+        items = []
+        while self.lex.peek().kind == WORD:
+            items.append(Text(self.lex.take().value.raw))
+        if self.lex.peek() not in (Token(OP, ";"), Token(OP, NEWLINE)):
+            raise ValueError("expected ; or newline after the word list")
+        return items
+
+    def case_command(self, _keyword):
+        subject = self.lex.take()
+        if subject.kind != WORD:
+            raise ValueError("expected a word after case")
+        items = [Text(subject.value.raw)]
+        self.skip_newlines()
+        self.expect_word("in")
+        self.skip_newlines()
+        while not self.is_word(self.lex.peek(), "esac"):
+            items += self.case_item()
+            if self.lex.peek().kind != OP or self.lex.peek().value not in CASE_ENDS:
+                break
+            self.lex.take()
+            self.skip_newlines()
+        self.expect_word("esac")
+        return items
+
+    def case_item(self):
+        if self.lex.peek() == Token(OP, "("):
+            self.lex.take()
+        items = [self.pattern()]
+        while self.lex.peek() == Token(OP, "|"):
+            self.lex.take()
+            items.append(self.pattern())
+        self.expect_op(")")
+        return items + self.command_list(("esac",) + CASE_ENDS, allow_empty=True)
+
+    def pattern(self):
+        token = self.lex.take()
+        if token.kind != WORD:
+            raise ValueError("expected a case pattern")
+        return Text(token.value.raw)
+
+    def conditional(self, _keyword):
+        return [Text(self.lex.conditional())]
+
+    def function_keyword(self, _keyword):
+        name = self.lex.take()
+        if name.kind != WORD:
+            raise ValueError("expected a function name")
+        if self.lex.peek() == Token(OP, "("):
+            self.lex.take()
+            if self.lex.peek() != Token(OP, ")"):  # function NAME ( list ): a subshell body
+                body = self.command_list((")",))
+                self.expect_op(")")
+                return [Func(name.value, (Sub(tuple(body)),))]
+            self.lex.take()
+        return [Func(name.value, tuple(self.function_body()))]
+
+    def function_body(self):
+        self.skip_newlines()
+        token = self.lex.peek()
+        if token == Token(OP, "("):
+            self.lex.take()
+            return self.paren()
+        if not self.is_word(token, *BODY_COMMANDS):
+            raise ValueError("a function body is a compound command")
+        self.lex.take()
+        return getattr(self, COMPOUND_COMMANDS[token.value.raw])(token.value.raw)
+
+    def starts_compound(self, token):
+        return token == Token(OP, "(") or self.is_word(token, *BODY_COMMANDS)
+
+    def coproc_command(self, _keyword):
+        """coproc [NAME] command: parsed for its syntax, never followed (a wrapper)."""
+        if not self.starts_compound(self.lex.peek()):
+            first = self.lex.take()
+            if first.kind != WORD:
+                raise ValueError("expected a command after coproc")
+            if not self.starts_compound(self.lex.peek()):
+                self.simple_command(first.value)
+                return [Text("")]
+        self.command()
+        return [Text("")]
+
+    def simple_command(self, first=None):
+        words = [first] if first else []
+        while self.lex.peek().kind == WORD:
+            words.append(self.lex.take().value)
+        side, self.lex.side = tuple(self.lex.side), []
+        if self.lex.peek() == Token(OP, "("):
+            return self.function_definition(words)
+        program = next((k for k, word in enumerate(words) if not is_assignment(word)), len(words))
+        declares = program < len(words) and not words[program].quoted and words[program].raw in DECLARATIONS
+        if not declares and any(word.array is not None for word in words[program:]):
+            raise ValueError("array value outside an assignment")
+        return [Cmd(tuple(words), side)]
+
+    def function_definition(self, words):
+        if len(words) != 1 or is_assignment(words[0]):
+            raise ValueError("( after a word")
+        self.lex.take()
+        self.expect_op(")")
+        return [Func(words[0], tuple(self.function_body()))]
+
+
+# ---- what the parsed script executes ------------------------------------------
+# Walks the items in order with what is known so far: arrays and literal scalar values by
+# name, function bodies by name. Anything that could change them in a way not modelled
+# here forgets them, so a reading error can only miss a launch, never invent one.
+
+@dataclasses.dataclass
+class ShellState:
+    values: dict  # name -> list of Words (an array, never changed in place) or one Word (a literal scalar)
+    functions: dict  # name -> body items
+    budget: list  # function calls still allowed to be followed, shared with subshells
+    stopped: bool = False
+    custom_ifs: bool = False  # IFS was named, so unquoted splitting is not known
+
+    def copy(self):
+        return ShellState(dict(self.values), dict(self.functions), self.budget, self.stopped,
+                          self.custom_ifs)
+
+    def forget_all(self):
+        self.values.clear()
+        self.functions.clear()
+
+
+def mentions(text, name):
+    """True when text names the variable other than by reading it whole ($N, ${N}, ${N[@]}, ${#N[*]})."""
+    if name not in text:
         return False
-    texts = [word.text for word in words]
-    return texts[start + 1:start + 1 + len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in texts
+    reads = re.compile(r"\$\{#?%s(?:\[[@*0-9]*\])?\}|\$%s(?![A-Za-z0-9_])" % (name, name))
+    return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % name, reads.sub("", text)) is not None
+
+
+def forget_mentions(state, text):
+    state.custom_ifs = state.custom_ifs or IFS_NAME in text
+    for name in [name for name in state.values if mentions(text, name)]:
+        del state.values[name]
+
+
+def mention_text(cmd):
+    raws = list(cmd.side)
+    for word in cmd.words:
+        raws.extend(e.raw for e in word.array.elements) if word.array else raws.append(word.raw)
+    return NEWLINE.join(raws)
+
+
+def walk(items, state, active=frozenset(), frame=None):
+    """True when the items execute a launch. active: the function call chain; frame: its local names."""
+    for item in items:
+        if state.stopped:
+            return False
+        if isinstance(item, Text):
+            forget_mentions(state, item.raw)
+        elif isinstance(item, Sub):
+            if walk(item.items, state.copy(), active, None if frame is None else set()):
+                return True
+        elif isinstance(item, Func):
+            define_function(state, item)
+        elif run_command(item, state, active, frame):
+            return True
+    return False
+
+
+def define_function(state, func):
+    name = func.name
+    if not name.quoted and "$" not in name.raw and "`" not in name.raw:
+        state.functions[name.text] = func.body
+
+
+def run_command(cmd, state, active, frame):
+    words = cmd.words
+    forget_mentions(state, mention_text(cmd))
+    program = next((k for k, word in enumerate(words) if not is_assignment(word)), len(words))
+    if program == len(words):
+        for word in words:
+            assign(state, word)
+        return False
+    expanded = expand_program(words[program], state)
+    if expanded is None:  # an array or variable whose value is not known: any program
+        state.forget_all()
+        return False
+    command = expanded + list(words[program + 1:])
+    return bool(command) and run_simple(command, state, active, frame)
+
+
+def expand_program(word, state):
+    """The words a program word or array element stands for, using known values; None when unknown."""
+    array = ARRAY_EXPANSION.match(word.raw)
+    if array:
+        quoted, name, kind = array.groups()
+        elements = state.values.get(name)
+        if not isinstance(elements, list):
+            return None
+        if quoted and kind == "@":
+            return list(elements)
+        if quoted:  # "${NAME[*]}" joins the elements into one word
+            joined = " ".join(e.text for e in elements)
+            return [Word(joined, joined, True)]
+        if state.custom_ifs:
+            return None
+        return [split for e in elements for split in split_element(e)]
+    quoted = len(word.raw) >= 2 and word.raw[0] == word.raw[-1] == '"'
+    variable = PROGRAM_VARIABLE.match(word.raw[1:-1] if quoted else word.raw)
+    if variable is None or (variable.group(1) or variable.group(2)) not in state.values:
+        return [word]
+    if state.custom_ifs and not quoted:
+        return None
+    value = state.values[variable.group(1) or variable.group(2)]
+    value = (value[0] if value else None) if isinstance(value, list) else value
+    return None if value is None or not value.text else [value]
+
+
+def split_element(word):
+    """An array element after unquoted expansion: split at blanks, dropped when empty."""
+    if "$" in word.raw or "`" in word.raw:
+        return [word]
+    return [Word(part, part, True) for part in word.text.split()]
+
+
+def run_simple(command, state, active, frame):
+    name = command[0].text
+    if name in state.functions:
+        return call_function(name, state, active)
+    if name in DECLARATIONS:
+        declare(command, state, frame)
+    elif name in STATE_RESETS:
+        state.forget_all()
+    elif name == "unset":
+        for word in command[1:]:
+            state.values.pop(word.text, None)
+            state.functions.pop(word.text, None)
+    elif stops_execution([word.text for word in command]):
+        state.stopped = True
+    elif is_launch(command):
+        return True
+    elif "$" in command[0].raw or "`" in command[0].raw:
+        state.forget_all()  # an unknown program, which may be a function that changes them
+    return False
+
+
+def call_function(name, state, active):
+    if name in active or state.budget[0] <= 0:
+        state.forget_all()  # recursion, or too many calls: what it changes is not followed
+        return False
+    state.budget[0] -= 1
+    saved, frame = dict(state.values), set()
+    if walk(state.functions[name], state, active | {name}, frame):
+        return True
+    for local in frame:
+        if local in saved:
+            state.values[local] = saved[local]
+        else:
+            state.values.pop(local, None)
+    return False
+
+
+def declare(command, state, frame):
+    local = frame is not None and command[0].text in LOCAL_DECLARATIONS \
+        and not any(GLOBAL_FLAG.match(word.text) for word in command[1:])
+    for word in command[1:]:
+        name = word.array.name if word.array else DECLARED_NAME.match(word.raw)
+        if name is None:
+            continue
+        if local:
+            frame.add(name if isinstance(name, str) else name.group(1))
+        assign(state, word)
+
+
+def assign(state, word):
+    """Remember an array, or a scalar with a literal value; forget what cannot be known."""
+    if word.array is not None:
+        name, indexed, append, elements = word.array
+        old = state.values.pop(name, None)
+        if indexed or any(e.raw.startswith("[") for e in elements):
+            return  # NAME[i]=( ) fails in bash; [i]=value elements are not followed
+        expanded = [expand_program(e, state) for e in elements]  # bash expands at assignment
+        if None in expanded:
+            return
+        elements = [w for words in expanded for w in words]
+        if not append:
+            state.values[name] = elements
+        elif isinstance(old, list):
+            state.values[name] = old + elements
+        return
+    match = ASSIGNMENT.match(word.raw)
+    if match is None:
+        return
+    name, old = match.group(1), state.values.pop(match.group(1), None)
+    value_raw = word.raw[match.end():]
+    if match.group(2) or match.group(3) or isinstance(old, list) or "$" in value_raw or "`" in value_raw:
+        return
+    state.values[name] = Word(word.text[match.end():], value_raw, word.quoted)
+
+
+def stops_execution(texts):
+    """set -n (noexec) runs nothing after it; with expand_aliases a later word may be an alias."""
+    if texts[0] == "set":
+        return any(NOEXEC_FLAG.match(t) for t in texts[1:]) or ("-o" in texts and "noexec" in texts)
+    return texts[0] == "shopt" and "-s" in texts and "expand_aliases" in texts
+
+
+def is_launch(command):
+    if not is_orca_program(command[0]):
+        return False
+    texts = [word.text for word in command]
+    return texts[1:1 + len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in texts
 
 
 def is_orca_program(word):
@@ -454,10 +1055,10 @@ def runs_launch(script):
     if not isinstance(script, str) or LAUNCH_HINT not in script:
         return False
     try:
-        commands = ShellScanner(script).scan()
+        items = ShellParser(script).parse()
+        return walk(items, ShellState({}, {}, [MAX_FUNCTION_CALLS]))
     except (ValueError, RecursionError):
         return False
-    return any(is_launch(words) for words in commands)
 
 
 def task_of(cwd):
@@ -492,9 +1093,9 @@ class Session:
 
     @property
     def role(self):
-        if self.spawned:
-            return "orchestrator"
-        return "worker" if self.dispatches else "other"
+        if self.dispatches:  # structural evidence first; see --help under Roles
+            return "worker"
+        return "orchestrator" if self.spawned else "other"
 
     def touch(self, ts):
         if ts is None:

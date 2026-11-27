@@ -74,7 +74,7 @@ ORCH, IMPL, MISC, MISC2 = "/w/orch-main", "/w/impl-task", "/w/misc", "/w2/misc"
 spawn = [{"type": "tool_use", "name": "Bash",
           "input": {"command": "orca orchestration worker-start --agent codex " + SENT}}]
 
-# S1: orchestrator. m1 on three lines (output grows), synthetic call, malformed + truncated lines.
+# S1: dispatched, and launches a worker: a worker (role order). m1 on three lines (output grows), synthetic call, malformed + truncated lines.
 write(P + "sess-orch.jsonl", [
     user("sess-orch", ORCH, "2026-11-10T09:59:00Z", [{"type": "text", "text": MARK + SENT}]),
     asst("sess-orch", ORCH, "2026-11-10T10:00:00Z", "m1", OPUS, usage(100, 1000, 200, 10)),
@@ -185,22 +185,22 @@ rm -rf "$FX/dsh-plain"
 run --format json >"$TMP/full.json" 2>"$TMP/full.err"; rc=$?
 [ "$rc" = 0 ] && ok "full run exits 0" || bad "full run rc=$rc"
 chk "claude: m1 counted once at highest output; synthetic skipped; resumed repeat ignored; subagent merged under parent" "$TMP/full.json" \
-  'tok(row("orch-main","orchestrator","claude","opus-test"))==(150,1500,200,35) and row("orch-main","orchestrator","claude","opus-test")["calls"]==2'
+  'tok(row("orch-main","worker","claude","opus-test"))==(150,1500,200,35) and row("orch-main","worker","claude","opus-test")["calls"]==2'
 chk "claude: subagent call under parent task and role, own model row" "$TMP/full.json" \
-  'tok(row("orch-main","orchestrator","claude","sonnet-test"))==(10,100,0,4) and row("orch-main","orchestrator","claude","sonnet-test")["sessions"]==1'
+  'tok(row("orch-main","worker","claude","sonnet-test"))==(10,100,0,4) and row("orch-main","worker","claude","sonnet-test")["sessions"]==1'
 chk "claude: malformed and truncated lines are counted" "$TMP/full.json" 'd["summary"]["meta"]["claude"]["lines_skipped"]==2'
 chk "claude: unreadable file counted, others read" "$TMP/full.json" \
   'd["summary"]["meta"]["claude"]["files_skipped"]==1 and d["summary"]["meta"]["claude"]["files_read"]==6'
 grep -q "broken.jsonl" "$TMP/full.err" && ok "unreadable file named on stderr" || bad "unreadable file not named on stderr"
-chk "claude: cwd kept in full" "$TMP/full.json" 'row("orch-main","orchestrator","claude","opus-test")["cwds"]==["/w/orch-main"]'
+chk "claude: cwd kept in full" "$TMP/full.json" 'row("orch-main","worker","claude","opus-test")["cwds"]==["/w/orch-main"]'
 chk "claude: wall time is last minus first counted call" "$TMP/full.json" \
   'sum(r["wall_seconds"] for r in d["rows"] if r["task"]=="orch-main")==223199'
 chk "claude: pull request seen in pr-link" "$TMP/full.json" \
   'row("impl-task","worker","claude")["pull_requests"]==[{"repository":"o/r","number":7}]'
 
 # ---- 2 Roles -------------------------------------------------------------------
-chk "roles: orchestrator beats a dispatch-style prompt; worker; other; quote in the middle stays other" "$TMP/full.json" \
-  'row("orch-main",agent="claude",model="opus-test")["role"]=="orchestrator" and row("impl-task",agent="claude")["role"]=="worker" and row("misc",agent="claude")["role"]=="other"'
+chk "roles: a dispatch prompt beats an executed launch; worker; other; quote in the middle stays other" "$TMP/full.json" \
+  'row("orch-main",agent="claude",model="opus-test")["role"]=="worker" and row("impl-task",agent="claude")["role"]=="worker" and row("misc",agent="claude")["role"]=="other"'
 chk "roles: task is the last path component; same name in two parents groups into one row" "$TMP/full.json" \
   'row("misc",agent="claude")["sessions"]==2 and row("misc",agent="claude")["cwds"]==["/w/misc","/w2/misc"] and tok(row("misc",agent="claude"))==(8,80,0,3)'
 
@@ -241,7 +241,7 @@ chk "dsh: without any zstd the meta counts the skipped file and no dsh row exist
 # ---- 5 Date range ---------------------------------------------------------------------
 run --format json --since 2026-11-12 --until 2026-11-12 >"$TMP/day.json" 2>/dev/null
 chk "range: one UTC day includes 23:59:59, excludes 00:00:00 next day and the day before" "$TMP/day.json" \
-  'tok(row("orch-main","orchestrator","claude","opus-test"))==(50,500,0,5) and tok(row("impl-task",agent="claude"))==(20,200,100,50) and not [r for r in d["rows"] if r["task"]=="misc"]'
+  'tok(row("orch-main","worker","claude","opus-test"))==(50,500,0,5) and tok(row("impl-task",agent="claude"))==(20,200,100,50) and not [r for r in d["rows"] if r["task"]=="misc"]'
 chk "range: codex and dsh sessions by their start day" "$TMP/day.json" \
   'row("review-task",agent="codex") and row("dsh-task",agent="dsh")'
 run --format json --until 2026-11-11 >"$TMP/early.json" 2>/dev/null
@@ -253,26 +253,26 @@ chk "range: --since alone keeps the later day" "$TMP/late.json" \
 
 # ---- 6 Summary ---------------------------------------------------------------------------
 chk "summary: Claude token shares, total and per kind" "$TMP/full.json" '(s:=d["summary"]["token_share_pct"]["claude"]) and
-s["total"]=={"orchestrator":81.3,"worker":15.0,"other":3.7} and
-s["input"]=={"orchestrator":85.1,"worker":10.6,"other":4.3} and
-s["cache_read"]=={"orchestrator":85.1,"worker":10.6,"other":4.3} and
-s["cache_creation"]=={"orchestrator":66.7,"worker":33.3,"other":0.0} and
-s["output"]=={"orchestrator":42.4,"worker":54.3,"other":3.3}'
+s["total"]=={"orchestrator":0.0,"worker":96.3,"other":3.7} and
+s["input"]=={"orchestrator":0.0,"worker":95.7,"other":4.3} and
+s["cache_read"]=={"orchestrator":0.0,"worker":95.7,"other":4.3} and
+s["cache_creation"]=={"orchestrator":0.0,"worker":100.0,"other":0.0} and
+s["output"]=={"orchestrator":0.0,"worker":96.7,"other":3.3}'
 chk "summary: shares over all agents" "$TMP/full.json" '(s:=d["summary"]["token_share_pct"]["all"]) and
-s["total"]=={"orchestrator":38.7,"worker":59.6,"other":1.8} and
-s["input"]=={"orchestrator":8.7,"worker":90.9,"other":0.4} and
-s["output"]=={"orchestrator":14.3,"worker":84.6,"other":1.1}'
+s["total"]=={"orchestrator":0.0,"worker":98.2,"other":1.8} and
+s["input"]=={"orchestrator":0.0,"worker":99.6,"other":0.4} and
+s["output"]=={"orchestrator":0.0,"worker":98.9,"other":1.1}'
 chk "summary: cost estimate shares from the last cost-state of each session, labelled" "$TMP/full.json" '(c:=d["summary"]["cost_estimate"]) and
-c["label"]=="Claude Code estimate, not a bill" and c["usd"]=={"orchestrator":3.0,"worker":1.0,"other":2.0} and
-c["share_pct"]=={"orchestrator":50.0,"worker":16.7,"other":33.3} and c["sessions_counted"]==4'
+c["label"]=="Claude Code estimate, not a bill" and c["usd"]=={"orchestrator":0.0,"worker":4.0,"other":2.0} and
+c["share_pct"]=={"orchestrator":0.0,"worker":66.7,"other":33.3} and c["sessions_counted"]==4'
 chk "summary: median context per call, Claude, per role" "$TMP/full.json" \
-  'd["summary"]["median_context_per_call"]=={"orchestrator":550,"worker":320,"other":44}'
+  'd["summary"]["median_context_per_call"]=={"orchestrator":None,"worker":435,"other":44}'
 chk "summary: cost counts only sessions with a counted call in range" "$TMP/day.json" \
-  'd["summary"]["cost_estimate"]["usd"]=={"orchestrator":3.0,"worker":1.0,"other":0.0} and d["summary"]["cost_estimate"]["sessions_counted"]==2'
+  'd["summary"]["cost_estimate"]["usd"]=={"orchestrator":0.0,"worker":4.0,"other":0.0} and d["summary"]["cost_estimate"]["sessions_counted"]==2'
 run >"$TMP/full.txt" 2>/dev/null
 grep -qF "$LABEL" "$TMP/full.txt" && ok "text: cost-estimate label present" || bad "text: label missing"
-grep -qF "orchestrator 81.3%  worker 15.0%  other 3.7%" "$TMP/full.txt" && ok "text: Claude total share line" || bad "text: share line missing"
-grep -qF "orchestrator 38.7%  worker 59.6%  other 1.8%" "$TMP/full.txt" && ok "text: all-agents total share line" || bad "text: all share line missing"
+grep -qF "orchestrator 0.0%  worker 96.3%  other 3.7%" "$TMP/full.txt" && ok "text: Claude total share line" || bad "text: share line missing"
+grep -qF "orchestrator 0.0%  worker 98.2%  other 1.8%" "$TMP/full.txt" && ok "text: all-agents total share line" || bad "text: all share line missing"
 
 # ---- 7 Orca overlay ------------------------------------------------------------------------
 cat > "$TMP/orca-stub" <<'EOF'
@@ -365,6 +365,7 @@ import json, os, sys, datetime as dt
 FX = sys.argv[1]
 MARK = "You are working inside Orca, a multi-agent IDE. You are a dispatched worker. "
 LAUNCH = "orca orchestration worker-start --agent codex --spec brief.md"
+ARRAY = "cmd=(orca orchestration worker-start --agent codex)"
 
 def write(path, lines):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -383,6 +384,15 @@ CASES = [
     # The re-review's two mentions, in a dispatched session: the session stays a worker.
     ("rev-comment", True, "shell", "# Example only; orca orchestration worker-start --agent codex\nprintf ok"),
     ("rev-quoted-semi", True, "shell", 'printf "%s\\n" ";" orca orchestration worker-start --agent codex'),
+    # Correction cycle 3. Role order: a dispatched session stays a worker, even when it really launches.
+    ("disp-launch", True, "shell", LAUNCH),
+    # The review's unexecuted array, dispatched and not; then the array really run.
+    ("disp-array", True, "shell", ARRAY + "\nprintf '%s\\n' \"${cmd[@]}\""),
+    ("array-only", False, "shell", ARRAY + "\nprintf '%s\\n' \"${cmd[@]}\""),
+    ("array-run", False, "shell", ARRAY + '\n"${cmd[@]}"'),
+    # A function holding the launch: defined only, then defined and called.
+    ("func-only", False, "shell", "start() { " + LAUNCH + "; }\necho ready"),
+    ("func-called", False, "shell", "start() { " + LAUNCH + "; }\necho ready\nstart"),
 ]
 CLAUDE_ONLY = [
     ("env-launch", False, "shell", "ORCA_X=1 /opt/bin/orca-dev orchestration worker-start --agent dsh"),
@@ -536,7 +546,9 @@ roles() { # roles SOURCE "task role" ...
 }
 for src in claude codex dsh; do
   roles "$src" "launch orchestrator" "grep-worker worker" "help other" "cd-launch orchestrator" \
-    "non-shell other" "unbalanced other" "rev-comment worker" "rev-quoted-semi worker"
+    "non-shell other" "unbalanced other" "rev-comment worker" "rev-quoted-semi worker" \
+    "disp-launch worker" "disp-array worker" "array-only other" "array-run orchestrator" \
+    "func-only other" "func-called orchestrator"
 done
 roles claude "env-launch orchestrator" "quoted-args other" "heredoc-body other" \
   "heredoc-then-launch orchestrator" "continued-launch orchestrator" "comment-only other" "pipe-launch orchestrator"
@@ -708,6 +720,171 @@ ROWS = [
     (True, "attack: arithmetic shift is not a here-document", "echo $((1<<2))\n" + L),
     (True, "attack: arithmetic shift inside an argument", L + ' --n "$((1 << 3))"\nls'),
     (True, "attack: case pattern inside $(...)", L + " --title \"$(case x in x) echo a;; esac)\""),
+    # Correction cycle 3. B1: an array value is one assignment word, never commands.
+    (False, "array: plain assignment", "cmd=(" + L + ")"),
+    (False, "array: += assignment", "cmd+=(" + L + ")"),
+    (False, "array: indexed assignment", "cmd[1]=(" + L + ")"),
+    (False, "array: after declare", "declare -a cmd=(" + L + ")"),
+    (False, "array: after local", "local cmd=(" + L + ")"),
+    (False, "array: after export", "export cmd=(" + L + ")"),
+    (False, "array: after readonly", "readonly cmd=(" + L + ")"),
+    (False, "array: after typeset", "typeset cmd=(" + L + ")"),
+    (False, "array: multi-line", "cmd=(\n  orca\n  orchestration worker-start\n  --agent codex\n)"),
+    (False, "array: comment inside", "cmd=(orca # the CLI\n  orchestration worker-start)"),
+    (False, "array: quoted elements", "cmd=('orca' \"orchestration\" worker-start)"),
+    (False, "array: nested $(...) element", 'cmd=(' + L + ' --title "$(date; echo x)")'),
+    (False, "array: then printf (the review case)", "cmd=(" + L + ")\nprintf '%s\\n' \"${cmd[@]}\""),
+    (False, "array: then echo of its length", "cmd=(" + L + ")\necho \"${#cmd[@]}\""),
+    (False, "array: as a prefix assignment is temporary", "cmd=(" + L + ") true\n\"${cmd[@]}\""),
+    (False, "array: assigned in a subshell", "(cmd=(" + L + "))\n\"${cmd[@]}\""),
+    (False, "array: assigned in a pipeline", "cmd=(" + L + ") | true\n\"${cmd[@]}\""),
+    (False, "array: value outside an assignment is a syntax error", "echo cmd=(x); " + L),
+    (False, "array: value after a quoted declare is a syntax error", '"declare" cmd=(x); ' + L),
+    # B2: a remembered array run as the program.
+    (True, "array run: \"${cmd[@]}\"", "cmd=(" + L + ")\n\"${cmd[@]}\""),
+    (True, "array run: ${cmd[@]}", "cmd=(" + L + ")\n${cmd[@]}"),
+    (True, "array run: ${cmd[*]}", "cmd=(" + L + ")\n${cmd[*]}"),
+    (False, "array run: \"${cmd[*]}\" joins into one program word", "cmd=(" + L + ")\n\"${cmd[*]}\""),
+    (True, "array run: the remaining words follow the elements", "cmd=(orca orchestration)\n\"${cmd[@]}\" worker-start --agent codex"),
+    (True, "array run: built with +=", "cmd=(orca)\ncmd+=(orchestration worker-start)\n\"${cmd[@]}\""),
+    (True, "array run: multi-line with a comment", "cmd=(\n  orca # the CLI\n  orchestration worker-start\n)\n\"${cmd[@]}\" --agent codex"),
+    (True, "array run: quoted elements", "cmd=('orca' \"orchestration\" worker-start)\n\"${cmd[@]}\""),
+    (True, "array run: after declare -a", "declare -a cmd=(" + L + ")\n\"${cmd[@]}\""),
+    (True, "array run: after export", "export cmd=(" + L + ")\n\"${cmd[@]}\""),
+    (True, "array run: after an assignment word", "cmd=(" + L + ")\nA=1 \"${cmd[@]}\""),
+    (True, "array run: unquoted expansion splits an element", "cmd=(\"orca orchestration\" worker-start)\n${cmd[@]}"),
+    (False, "array run: quoted expansion keeps an element whole", "cmd=(\"orca orchestration\" worker-start)\n\"${cmd[@]}\""),
+    (True, "array run: an empty array leaves the next word as program", "cmd=()\n\"${cmd[@]}\" " + L),
+    (False, "array run: an element that looks like an assignment is the program", "cmd=(A=1 " + L + ")\n\"${cmd[@]}\""),
+    (False, "array run: reassigned to another command", "cmd=(" + L + ")\ncmd=(echo hi)\n\"${cmd[@]}\""),
+    (False, "array run: element 0 changed", "cmd=(" + L + ")\ncmd[0]=echo\n\"${cmd[@]}\""),
+    (False, "array run: scalar assignment changes element 0", "cmd=(" + L + ")\ncmd=echo\n\"${cmd[@]}\""),
+    (False, "array run: unset", "cmd=(" + L + ")\nunset cmd\n\"${cmd[@]}\""),
+    (False, "array run: read into it", "cmd=(" + L + ")\nread -ra cmd <<< 'echo hi'\n\"${cmd[@]}\""),
+    (False, "array run: changed by arithmetic", "cmd=(" + L + ")\n(( cmd[0] = 1 ))\n\"${cmd[@]}\""),
+    (False, "array run: after eval", "cmd=(" + L + ")\neval 'cmd=(echo)'\n\"${cmd[@]}\""),
+    (False, "array run: never assigned", "\"${cmd[@]}\" orchestration worker-start"),
+    (False, "array run: indexed elements are not followed", "cmd=([0]=orca [1]=orchestration [2]=worker-start)\n\"${cmd[@]}\""),
+    (True, "array named like the Orca variable, run", "ORCA_CLI_COMMAND=(" + L + ")\n\"${ORCA_CLI_COMMAND[@]}\""),
+    (False, "array named like the Orca variable, printed", "ORCA_CLI_COMMAND=(" + L + ")\necho \"${ORCA_CLI_COMMAND[@]}\""),
+    (False, "array named like the Orca variable, then the variable as program", "ORCA_CLI_COMMAND=(echo)\n\"$ORCA_CLI_COMMAND\" orchestration worker-start"),
+    (True, "Orca variable assigned orca in the script", "ORCA_CLI_COMMAND=orca\n\"$ORCA_CLI_COMMAND\" orchestration worker-start"),
+    (False, "Orca variable assigned another program in the script", "ORCA_CLI_COMMAND=echo\n\"$ORCA_CLI_COMMAND\" orchestration worker-start"),
+    (False, "Orca variable with :+ is not the variable", "${ORCA_CLI_COMMAND:+echo} orchestration worker-start"),
+    (True, "array run: a function named by an element", "start() { " + L + "; }\ncmd=(start)\n\"${cmd[@]}\""),
+    (True, "array run: a global array set in a function", "set_cmd() { cmd=(" + L + "); }\nset_cmd\n\"${cmd[@]}\""),
+    (False, "array run: a local array of a function", "set_cmd() { local cmd=(" + L + "); }\nset_cmd\n\"${cmd[@]}\""),
+    (True, "array run: declare -g in a function", "set_cmd() { declare -g cmd=(" + L + "); }\nset_cmd\n\"${cmd[@]}\""),
+    (True, "array run: command skips the function that would change it", "cmd=(" + L + ")\nreset() { cmd=(echo); }\ncommand reset\n\"${cmd[@]}\""),
+    # B3: a function definition does not run its body; a call does.
+    (False, "function: { } body never called", "start() { " + L + "; }"),
+    (True, "function: { } body called", "start() { " + L + "; }\nstart"),
+    (False, "function: ( ) body never called", "start() ( " + L + " )"),
+    (True, "function: ( ) body called", "start() ( " + L + " )\nstart"),
+    (False, "function keyword: { } body never called", "function start { " + L + "; }"),
+    (True, "function keyword: { } body called", "function start { " + L + "; }; start"),
+    (False, "function keyword with (): ( ) body never called", "function start() ( " + L + " )"),
+    (True, "function keyword with (): ( ) body called", "function start() ( " + L + " ); start"),
+    (False, "function keyword: ( ) body without () never called", "function start (" + L + ")"),
+    (False, "function: called before its definition", "start\nstart() { " + L + "; }"),
+    (True, "function: calling another", "a() { b; }\nb() { " + L + "; }\na"),
+    (False, "function: calling another, never called", "a() { b; }\nb() { " + L + "; }"),
+    (True, "function: recursive", "a() { " + L + "; a; }\na"),
+    (False, "function: recursive without a launch", "a() { b; }\nb() { a; }\na"),
+    (False, "function: defined inside another, outer never called", "outer() { inner() { " + L + "; }; }\ninner"),
+    (False, "function: defined inside another, inner never called", "outer() { inner() { " + L + "; }; }\nouter"),
+    (True, "function: defined inside another, both called", "outer() { inner() { " + L + "; }; }\nouter\ninner"),
+    (False, "function: if body never called", "f() if true; then " + L + "; fi"),
+    (True, "function: if body called", "f() if true; then " + L + "; fi\nf"),
+    (False, "function: body on the next line never called", "f()\n{\n  " + L + "\n}"),
+    (True, "function: body with a redirect, called", "f() { " + L + "; } > /dev/null\nf"),
+    (True, "function: called in a pipeline", "f() { " + L + "; }\nf | cat"),
+    (True, "function: called by a quoted name", "f() { " + L + "; }\n\"f\""),
+    (False, "function: named orca shadows the CLI", "orca() { echo stub; }\n" + L),
+    (False, "function: unset before the call", "f() { " + L + "; }\nunset -f f\nf"),
+    (False, "function: redefined before the call", "f() { " + L + "; }\nf() { :; }\nf"),
+    (False, "function: defined in a subshell", "( f() { " + L + "; } )\nf"),
+    (False, "function: defined in a pipeline", "f() { " + L + "; } | cat\nf"),
+    (False, "function: defined after an assignment is a syntax error", "x=1 f() { :; }; " + L),
+    (False, "function: quoted name is not defined", "\"f\"() { " + L + "; }\nf"),
+    (False, "function: case pattern ) inside a ( ) body", "f() ( case x in x) echo;; esac; " + L + " )"),
+    (True, "function: case pattern ) inside a ( ) body, called", "f() ( case x in x) echo;; esac; " + L + " )\nf"),
+    # Self-attack over the Bash grammar: launch words present but not run, then run.
+    (False, "grammar: pipeline element prints it", "echo " + L + " | cat"),
+    (True, "grammar: |& pipeline", L + " |& cat"),
+    (True, "grammar: && list, not evaluated", "false && " + L),
+    (False, "grammar: for word list", "for w in " + L + "; do echo \"$w\"; done"),
+    (True, "grammar: for body", "for w in a; do " + L + "; done"),
+    (True, "grammar: arithmetic for", "for ((i = 0; i < 1; i++)); do " + L + "; done"),
+    (False, "grammar: arithmetic for prints it", "for ((i = 0; i < 1; i++)) do echo \"" + L + "\"; done"),
+    (True, "grammar: for with a { } body", "for w in a; { " + L + "; }"),
+    (False, "grammar: select word list", "select w in " + L + "; do break; done < /dev/null"),
+    (True, "grammar: select body", "select w in a; do " + L + "; break; done < /dev/null"),
+    (False, "grammar: case subject and patterns", "case $x in orca|orchestration|worker-start) echo hit;; esac"),
+    (True, "grammar: case item", "case x in x) " + L + ";; esac"),
+    (True, "grammar: case item with ( pattern", "case x in (x|y) " + L + ";; esac"),
+    (True, "grammar: case item after ;;&", "case x in a) echo;;& *) " + L + ";; esac"),
+    (True, "grammar: case on several lines", "case x in\n  a)\n    echo a\n    ;;\n  *)\n    " + L + "\n    ;;\nesac"),
+    (True, "grammar: case inside a subshell", "( case x in x) echo;; esac; " + L + " )"),
+    (False, "grammar: if condition prints it", "if echo " + L + "; then :; fi"),
+    (True, "grammar: if branch, not evaluated", "if false; then " + L + "; fi"),
+    (False, "grammar: while condition prints it", "while echo " + L + "; do break; done"),
+    (True, "grammar: while body, not evaluated", "while false; do " + L + "; done"),
+    (False, "grammar: [[ ]] string", "[[ -n \"" + L + "\" ]] && echo yes"),
+    (False, "grammar: [[ ]] with && and a regex", "[[ a && x =~ (orca|y) ]] && echo yes"),
+    (True, "grammar: launch after [[ ]] on several lines", "[[ a &&\n  b ]]\n" + L),
+    (False, "grammar: (( )) holding the words", "(( orca + orchestration + worker ))"),
+    (True, "grammar: launch after (( ))", "(( 1 )) && " + L),
+    (True, "grammar: (( )) shift is not a here-document", "(( x = 1 << 2 ))\n" + L),
+    (True, "grammar: (( that is a nested subshell", "((" + L + ") )"),
+    (False, "grammar: { } group prints it", "{ echo " + L + "; }"),
+    (True, "grammar: { } groups nested without ;", "{ { true; } }; " + L),
+    (True, "grammar: if condition is a group", "if { true; } then " + L + "; fi"),
+    (True, "grammar: ! { }", "! { " + L + "; }"),
+    (True, "grammar: time { }", "time { " + L + "; }"),
+    (False, "grammar: coproc is a wrapper", "coproc " + L),
+    (False, "grammar: coproc group is a wrapper", "coproc NAME { " + L + "; }"),
+    (False, "grammar: a stray fi is a syntax error", "fi\n" + L),
+    (False, "grammar: ;; outside case is a syntax error", "echo a;; " + L),
+    (False, "grammar: in at command start is a syntax error", "in x; " + L),
+    (False, "grammar: empty group is a syntax error", "{ }; " + L),
+    (True, "grammar: exit does not stop the static reading", "exit 0\n" + L),
+    (False, "grammar: set -n stops execution", "set -n\n" + L),
+    (False, "grammar: aliases may rename the program", "shopt -s expand_aliases\nalias orca=echo\n" + L),
+    (True, "grammar: += assignment word before the program", "A+=1 " + L),
+    (True, "grammar: indexed assignment word before the program", "a[0]=x " + L),
+    # Further self-attack after the first implementation.
+    (False, "array run: unquoted, with IFS changed", "cmd=(" + L + ")\nIFS=o\n${cmd[@]}"),
+    (False, "function running its arguments is not followed", 'run() { "$@"; }\nrun ' + L),
+    (False, "function: here-document in the body", "f() {\n  cat <<EOF\n" + L + "\nEOF\n}\nf"),
+    (True, "function: defined in an if branch, called", "if true; then f() { " + L + "; }; fi\nf"),
+    (True, "function: defined after &&, called", "true && f() { " + L + "; }\nf"),
+    (False, "function: comment holding } inside the body", "f() { # }\n  " + L + "\n}"),
+    (False, "function: declare -f prints it", "f() { " + L + "; }\ndeclare -f f"),
+    (True, "function: name with a hyphen", "start-worker() { " + L + "; }\nstart-worker"),
+    (True, "function keyword: body on later lines", "function f\n{\n  " + L + "\n}\nf"),
+    (False, "function keyword shadows the CLI", "function orca { :; }\n" + L),
+    (True, "array run: in a subshell", "cmd=(" + L + ")\n( \"${cmd[@]}\" )"),
+    (True, "array run: background call to a function does not change it", "cmd=(" + L + ")\nf() { cmd=(echo); }\nf &\n\"${cmd[@]}\""),
+    (False, "array run: nameref may change it", "cmd=(" + L + ")\ndeclare -n r=cmd\nr=(echo)\n\"${cmd[@]}\""),
+    (False, "array run: printf -v", "cmd=(" + L + ")\nprintf -v cmd '%s' echo\n\"${cmd[@]}\""),
+    (False, "array run: let", "cmd=(" + L + ")\nlet cmd[0]=1\n\"${cmd[@]}\""),
+    (False, "array run: unset of one element", "cmd=(" + L + ")\nunset 'cmd[0]'\n\"${cmd[@]}\""),
+    (False, "array run: arithmetic expansion assigns", "cmd=(" + L + ")\n: $((cmd[0]=1))\n\"${cmd[@]}\""),
+    (False, "array run: here-document body assigns", "cmd=(" + L + ")\ncat <<EOF\n$((cmd[0]=1))\nEOF\n\"${cmd[@]}\""),
+    (False, "array run: --help among the elements", "cmd=(" + L + " --help)\n\"${cmd[@]}\""),
+    (True, "array run: copied into another array", "a=(" + L + ")\nb=(\"${a[@]}\")\n\"${b[@]}\""),
+    (False, "grammar: trap is not followed", "trap '" + L + "' EXIT"),
+    (True, "group: function defined in { } without ; before }", "{ f() { " + L + "; } }\nf"),
+    (False, "case: launch words as a pattern with escaped blanks", "case x in orca\\ orchestration\\ worker-start) ;; esac"),
+    (True, "case: function defined in an item, called", "case x in x) f() { " + L + "; };; esac\nf"),
+    (False, "set -o noexec", "set -o noexec\n" + L),
+    (True, "set -e does not stop the reading", "set -euo pipefail\n" + L),
+    (True, "exec with only redirects", "exec 3>&1\n" + L),
+    (True, "local at top level still assigns", "local cmd=(" + L + ") 2>/dev/null\n\"${cmd[@]}\""),
+    (True, "Orca variable assigned empty, default orca", "ORCA_CLI_COMMAND=\n\"${ORCA_CLI_COMMAND:-orca}\" orchestration worker-start"),
+    (False, "array run: an element holding a known variable", 'ORCA=echo\ncmd=("$ORCA" orchestration worker-start)\n"${cmd[@]}"'),
+    (True, "array run: an element holding a known orca variable", 'ORCA=orca\ncmd=("$ORCA" orchestration worker-start)\n"${cmd[@]}"'),
 ]
 EOF
 SCAN='import sys
@@ -720,8 +897,15 @@ for expected, name, script in scan_rows.ROWS:
 "$PY" -I -c "$SCAN" "$ROOT/tools" "$TMP" >"$TMP/scan.out" 2>&1 || bad "scanner table: import or run failed"
 cat "$TMP/scan.out"
 grep -q '^FAIL' "$TMP/scan.out" && fail=1
-[ "$(grep -c '^ok   scanner: ' "$TMP/scan.out")" -ge 140 ] || bad "scanner table: fewer rows passed than expected"
+[ "$(grep -c '^ok   scanner: ' "$TMP/scan.out")" -ge 270 ] || bad "scanner table: fewer rows passed than expected"
 grep -qi "command substitution" "$TMP/help.txt" && grep -qi "wrapper" "$TMP/help.txt" && grep -qi "comment" "$TMP/help.txt" \
   && ok "help states the scanner rules and its limits" || bad "help: scanner rules or limits not described"
+grep -qi "structural evidence" "$TMP/help.txt" && grep -qi "dispatched worker that starts workers of its own is a" "$TMP/help.txt" \
+  && ok "help states the role order and its reason" || bad "help: role order or its reason not described"
+grep -qi "array value" "$TMP/help.txt" && grep -qi "define a function" "$TMP/help.txt" \
+  && ok "help states the array and function rules" || bad "help: array or function rule not described"
+grep -qi "the launch test is static" "$TMP/help.txt" && grep -qi "control flow" "$TMP/help.txt" \
+  && grep -qi "never an invented one" "$TMP/help.txt" && grep -qi "coproc, nohup" "$TMP/help.txt" \
+  && ok "help states the static limits" || bad "help: static limits not described"
 
 exit $fail
