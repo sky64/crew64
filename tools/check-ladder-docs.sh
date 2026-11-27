@@ -363,6 +363,21 @@ forbid docs/11-plugin-install.md "(one approving review, admin enforcement, no f
 need docs/decisions/0011-machine-merge-gate.md "does not prove that a review happened"
 need docs/decisions/0011-machine-merge-gate.md "## How to revert"
 need .github/workflows/ci.yml "  ci:"
+# Codex review of 74519d5, blocker 2: the verdict contract, so follow-ups alone never post failure.
+need AGENTS.md "VERDICT: CLEAN <full reviewed sha>"
+need AGENTS.md "VERDICT: FINDINGS <full reviewed sha>"
+need AGENTS.md "Follow-ups alone never make a FINDINGS verdict"
+need skills/orchestrator/SKILL.md "Every reviewer brief, first review and re-review, requires the verdict contract"
+need skills/orchestrator/SKILL.md "means no blocker remains (follow-ups may still be listed)"
+need skills/orchestrator/SKILL.md "means at least one blocker remains"
+need skills/orchestrator/SKILL.md "Follow-ups alone never make a FINDINGS verdict"
+need docs/decisions/0011-machine-merge-gate.md "VERDICT: CLEAN <full reviewed sha>"
+need docs/decisions/0011-machine-merge-gate.md "Follow-ups alone never make a FINDINGS verdict"
+# Codex review of 74519d5, blocker 1: CI reads file names NUL-separated and fails on an unreadable one.
+need .github/workflows/ci.yml "git ls-files -z tools"
+need .github/workflows/ci.yml "while IFS= read -r -d '' f; do"
+need .github/workflows/ci.yml 'cannot read $f'
+forbid .github/workflows/ci.yml "done < <(git ls-files tools)"
 need .github/workflows/ci.yml "contents: read"
 need .github/workflows/ci.yml "claude plugin validate ."
 need tools/bot/review-status.sh "context=codex-review"

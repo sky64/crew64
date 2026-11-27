@@ -124,4 +124,9 @@ names "workflow job renamed from ci → rejected" .github/workflows/ci.yml "ci:"
 fresh; sed -i 's/"bot_identity": true/"bot_identity": false/' "$COPY/.claude/crew64.json"
 names "this repository's bot_identity switched off → rejected" .claude/crew64.json "bot_identity"
 
+fresh; sed -i 's/Follow-ups alone never make a FINDINGS verdict/Any finding makes a FINDINGS verdict/' "$COPY/skills/orchestrator/SKILL.md"
+names "skill without the follow-ups-never-FINDINGS contract → rejected" skills/orchestrator/SKILL.md "Follow-ups alone never make a FINDINGS verdict"
+fresh; sed -i "s/git ls-files -z tools > /git ls-files tools > /" "$COPY/.github/workflows/ci.yml"
+names "workflow listing tools/ without -z → rejected" .github/workflows/ci.yml "git ls-files -z tools"
+
 exit $fail
