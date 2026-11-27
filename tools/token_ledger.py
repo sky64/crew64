@@ -30,6 +30,9 @@ KINDS = ("input", "cache_read", "cache_creation", "output")
 ROLES = ("orchestrator", "worker", "other")
 AGENTS = ("claude", "codex", "dsh")
 ORCA_PROGRAMS = frozenset({"orca", "orca-ide", "orca-dev"})
+# A program word that is one shell variable and nothing else: $NAME, ${NAME}, ${NAME:-default}.
+PROGRAM_VARIABLE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\})\Z")
+ORCA_VARIABLE_PART = "orca"  # e.g. ORCA_CLI_COMMAND, the variable this repository's scripts use
 LAUNCH_WORDS = ["orchestration", "worker-start"]
 LAUNCH_HINT = "worker"  # cheap pre-check; every launch command contains it
 HELP_FLAG = "--help"
@@ -66,8 +69,12 @@ arguments.command). Here-document bodies are dropped, backslash-newline is
 joined, and the script is split quote-aware (shlex) into simple commands at
 shell operators and newlines; words from one starting with "#" are a comment.
 A simple command is a launch when, after any VAR=value words, its program is
-orca, orca-ide or orca-dev by basename, its next words are "orchestration
-worker-start", and it has no --help. Text in other tools' arguments or in a
+orca, orca-ide or orca-dev by basename, or is one shell variable whose name
+contains "orca" in any case ($ORCA_CLI_COMMAND, ${ORCA_CLI_COMMAND:-orca}),
+its next words are "orchestration worker-start", and it has no --help. The
+variable's value is not known to the ledger; the subcommand words decide. A
+variable with any other name, or a variable that is only part of the program
+word, is not a launch. Text in other tools' arguments or in a
 quoted argument of another program is not a launch, and neither is a command
 that cannot be tokenized.
 
@@ -211,8 +218,17 @@ def is_launch(words):
     words = list(itertools.takewhile(lambda w: not w.startswith("#"), words))
     start = next((i for i, w in enumerate(words) if not ASSIGNMENT.match(w)), len(words))
     program, rest = words[start:start + 1], words[start + 1:]
-    return bool(program) and os.path.basename(program[0]) in ORCA_PROGRAMS \
+    return bool(program) and is_orca_program(program[0]) \
         and rest[:len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in rest
+
+
+def is_orca_program(word):
+    """True for the Orca CLI by basename, or for one shell variable named after it."""
+    if os.path.basename(word) in ORCA_PROGRAMS:
+        return True
+    variable = PROGRAM_VARIABLE.match(word)
+    return variable is not None \
+        and ORCA_VARIABLE_PART in (variable.group(1) or variable.group(2)).lower()
 
 
 def runs_launch(script):

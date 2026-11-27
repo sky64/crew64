@@ -389,6 +389,14 @@ CLAUDE_ONLY = [
     ("continued-launch", False, "shell", "orca orchestration \\\n  worker-start --agent codex"),
     ("comment-only", False, "shell", "# " + LAUNCH + "\nls"),
     ("pipe-launch", False, "shell", "true | " + LAUNCH + " --json 2>&1"),
+    # The Orca CLI named through a shell variable (this repository's own scripts use ORCA_CLI_COMMAND).
+    ("var-launch", False, "shell", '"$ORCA_CLI_COMMAND" orchestration worker-start --agent codex'),
+    ("braced-var-launch", False, "shell", 'ls .agents; "${ORCA_CLI_COMMAND:-orca}" orchestration worker-start --agent codex'),
+    ("bare-var-launch", False, "shell", "cd dir && $orca_bin orchestration worker-start --agent dsh"),
+    ("other-var", False, "shell", '"$EDITOR" orchestration worker-start --agent codex'),
+    ("var-help", False, "shell", "$ORCA orchestration worker-start --help"),
+    ("var-grep", False, "shell", 'rg -n "$ORCA_CLI_COMMAND orchestration worker-start" docs'),
+    ("var-suffix", False, "shell", '"$ORCA_HOME/bin/tool" orchestration worker-start --agent codex'),
 ]
 
 # ---- Claude: tool_use name Bash, input.command ----
@@ -529,6 +537,9 @@ for src in claude codex dsh; do
 done
 roles claude "env-launch orchestrator" "quoted-args other" "heredoc-body other" \
   "heredoc-then-launch orchestrator" "continued-launch orchestrator" "comment-only other" "pipe-launch orchestrator"
+roles claude "var-launch orchestrator" "braced-var-launch orchestrator" "bare-var-launch orchestrator" \
+  "other-var other" "var-help other" "var-grep other" "var-suffix other"
+grep -qi "shell variable" "$TMP/help.txt" && ok "help states the shell-variable launch rule" || bad "help: shell-variable launch rule not described"
 grep -qi "simple command" "$TMP/help.txt" && grep -qi "here-document" "$TMP/help.txt" && grep -qi "counter_decreases" "$TMP/help.txt" \
   && ok "help states the executed-launch rule and the per-model Codex split" || bad "help: role rule or Codex split not described"
 
