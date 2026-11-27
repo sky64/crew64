@@ -14,7 +14,7 @@ printf '## State\n\n| Item | Result |\n|---|---|\n| Claude Code hooks | x |\n' >
 
 stub "1.4.259"
 out="$(ORCA_CLI_COMMAND="$TMP/orca" bash "$CHECK" "$TMP/docs12.md" 2>&1)"; rc=$?
-[ "$rc" = 0 ] && [ "$out" = "orca=1.4.259 docs12=1.4.255 drift=yes" ] && ok "newer host → drift=yes" || bad "drift yes: rc=$rc out=$out"
+[ "$rc" = 0 ] && [ "$out" = "orca=1.4.259 docs12=1.4.255 drift=BROKEN" ] && ok "newer host → drift=yes" || bad "drift yes: rc=$rc out=$out"
 
 stub "orca 1.4.255 (build x)"
 out="$(ORCA_CLI_COMMAND="$TMP/orca" bash "$CHECK" "$TMP/docs12.md" 2>&1)"; rc=$?
