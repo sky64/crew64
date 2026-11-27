@@ -14,6 +14,8 @@ import datetime as dt
 import itertools
 import json
 import os
+import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -27,7 +29,16 @@ except ImportError:
 KINDS = ("input", "cache_read", "cache_creation", "output")
 ROLES = ("orchestrator", "worker", "other")
 AGENTS = ("claude", "codex", "dsh")
-SPAWN_MARKER = "orchestration worker-start"
+ORCA_PROGRAMS = frozenset({"orca", "orca-ide", "orca-dev"})
+LAUNCH_WORDS = ["orchestration", "worker-start"]
+LAUNCH_HINT = "worker"  # cheap pre-check; every launch command contains it
+HELP_FLAG = "--help"
+SHELL_OPERATOR_CHARS = "();<>|&\n"
+SHELL_WHITESPACE = " \t\r"
+SHELLS = frozenset({"bash", "sh", "zsh"})
+SHELL_SCRIPT_FLAGS = frozenset({"-c", "-lc"})
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 ORCA_LINE = "You are working inside Orca"
 WORKER_LINE = "You are a dispatched worker"
 ORCA_LINE_MAX_OFFSET = 120  # a real dispatch prompt opens with the Orca line
@@ -41,12 +52,24 @@ UNKNOWN = "(unknown)"
 PCT_DIGITS = 1
 
 EPILOG = """\
-Roles (first rule that holds): orchestrator = the session ran
-"orchestration worker-start"; worker = a user turn is an Orca dispatch prompt
+Roles (first rule that holds): orchestrator = the session executed an Orca
+launch (rule below); worker = a user turn is an Orca dispatch prompt
 (it opens with "You are working inside Orca" and says "You are a dispatched
 worker" within the first lines; a prompt that only quotes the phrase later in
 other text does not count); other. A subagent file takes the role and task of
 its parent session. task = last path component of the session cwd.
+
+Launch rule: only shell tool calls are read (Claude: tool_use "Bash",
+input.command; Codex: event_msg item_completed with item type
+"CommandExecution", command [bash, -lc, script]; dsh: tool/call "bash",
+arguments.command). Here-document bodies are dropped, backslash-newline is
+joined, and the script is split quote-aware (shlex) into simple commands at
+shell operators and newlines; words from one starting with "#" are a comment.
+A simple command is a launch when, after any VAR=value words, its program is
+orca, orca-ide or orca-dev by basename, its next words are "orchestration
+worker-start", and it has no --help. Text in other tools' arguments or in a
+quoted argument of another program is not a launch, and neither is a command
+that cannot be tokenized.
 
 Date range (UTC days, both ends inclusive):
   Claude and dsh are filtered per call, by the call's own timestamp.
@@ -59,13 +82,18 @@ resumed session does not repeat it). <synthetic> calls are skipped. Context of
 a call = input + cache read + cache creation. Cost figures are Claude Code's
 own estimate, not a bill. Wall time = last minus first counted call.
 
-Codex: the last cumulative token_count of a session is used. In Codex,
+Codex: token_count carries cumulative totals. Each one is mapped as below and
+its growth over the previous one is credited to the model of the latest
+turn_context, so a session that switches model gets one row per model and
+those rows add up to the mapping of the last cumulative record. A mapped
+counter that goes down (not seen in the logs checked) adds nothing for that
+kind and is counted in meta counter_decreases. In Codex,
 input_tokens includes cached_input_tokens (total_tokens = input + output), so:
 input = input_tokens - cached_input_tokens - cache_write_input_tokens (never
 below 0), cache_read = cached_input_tokens, cache_creation =
 cache_write_input_tokens (never non-zero in the logs checked; whether it is
 inside input_tokens is unverified), output = output_tokens (it includes
-reasoning tokens). Calls = token_count events whose cumulative total grew.
+reasoning tokens). Calls = token_count events whose cumulative total changed.
 Wall time = first to last record. review_passes = dispatch prompts received.
 
 dsh: zstd-compressed JSONL, read with compression.zstd when it imports (Python
@@ -141,8 +169,61 @@ def text_parts(content):
             yield block["text"]
 
 
-def spawns_workers(text):
-    return isinstance(text, str) and SPAWN_MARKER in text
+def strip_heredocs(script):
+    """Drop here-document bodies: their lines are input data, not commands."""
+    lines, kept, i = script.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        found = HEREDOC.search(line)
+        if found is None:
+            continue
+        tabs, end = found.group(1), found.group(3)
+        while i < len(lines) and (lines[i].lstrip("\t") if tabs else lines[i]) != end:
+            i += 1
+        i += 1  # the delimiter line
+    return "\n".join(kept)
+
+
+def simple_commands(script):
+    """Split a shell script into the word lists of its simple commands.
+
+    Raises ValueError when the script cannot be tokenized (an unbalanced quote).
+    """
+    lexer = shlex.shlex(strip_heredocs(script).replace("\\\n", " "), posix=True,
+                        punctuation_chars=SHELL_OPERATOR_CHARS)
+    lexer.whitespace = SHELL_WHITESPACE
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    commands, words = [], []
+    for token in list(lexer):
+        if token and all(ch in SHELL_OPERATOR_CHARS for ch in token):
+            commands.append(words)
+            words = []
+        else:
+            words.append(token)
+    commands.append(words)
+    return [w for w in commands if w]
+
+
+def is_launch(words):
+    words = list(itertools.takewhile(lambda w: not w.startswith("#"), words))
+    start = next((i for i, w in enumerate(words) if not ASSIGNMENT.match(w)), len(words))
+    program, rest = words[start:start + 1], words[start + 1:]
+    return bool(program) and os.path.basename(program[0]) in ORCA_PROGRAMS \
+        and rest[:len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in rest
+
+
+def runs_launch(script):
+    """True when a shell command string executes an Orca worker launch."""
+    if not isinstance(script, str) or LAUNCH_HINT not in script:
+        return False
+    try:
+        commands = simple_commands(script)
+    except ValueError:
+        return False
+    return any(is_launch(words) for words in commands)
 
 
 def task_of(cwd):
@@ -360,8 +441,8 @@ def claude_assistant(rec, sess, store, sid):
     content = msg.get("content")
     for block in content if isinstance(content, list) else ():
         if isinstance(block, dict) and block.get("type") == "tool_use" \
-                and isinstance(block.get("input"), dict) \
-                and spawns_workers(block["input"].get("command")):
+                and block.get("name") == "Bash" and isinstance(block.get("input"), dict) \
+                and runs_launch(block["input"].get("command")):
             sess.spawned = True
     model = msg.get("model") if isinstance(msg.get("model"), str) else "unknown"
     if model == SYNTHETIC_MODEL or not isinstance(msg.get("usage"), dict):
@@ -411,13 +492,26 @@ def codex_tokens(usage):
     return (max(0, total_in - cached - written), cached, written, as_int(usage.get("output_tokens")))
 
 
+def codex_launch(item):
+    """True for a CommandExecution item whose [shell, -lc, script] runs a launch."""
+    if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+        return False
+    command = item.get("command")
+    if not (isinstance(command, list) and len(command) == 3
+            and all(isinstance(word, str) for word in command)):
+        return False
+    shell, flag, script = command
+    return os.path.basename(shell) in SHELLS and flag in SHELL_SCRIPT_FLAGS and runs_launch(script)
+
+
 class CodexState:
-    def __init__(self, sess):
+    def __init__(self, sess, meta):
         self.sess = sess
+        self.meta = meta
         self.model = "unknown"
-        self.usage = None
+        self.models = {}  # model -> {"tokens": tuple of KINDS, "calls": int}
+        self.last = (0,) * len(KINDS)
         self.last_total = None
-        self.calls = 0
         self.start = None
 
     def handle(self, rec):
@@ -434,6 +528,9 @@ class CodexState:
             self.response_item(payload)
         elif kind == "event_msg" and payload.get("type") == "token_count":
             self.token_count(payload.get("info"))
+        elif kind == "event_msg" and payload.get("type") == "item_completed" \
+                and codex_launch(payload.get("item")):
+            self.sess.spawned = True
 
     def turn_context(self, payload):
         if isinstance(payload.get("model"), str):
@@ -443,22 +540,25 @@ class CodexState:
             self.sess.efforts.add(effort)
 
     def response_item(self, payload):
-        kind = payload.get("type")
-        if kind == "message" and payload.get("role") == "user":
+        if payload.get("type") == "message" and payload.get("role") == "user":
             self.sess.dispatches += sum(is_dispatch_prompt(t) for t in codex_texts(payload))
-        elif kind in ("function_call", "custom_tool_call"):
-            if spawns_workers(payload.get("arguments")) or spawns_workers(payload.get("input")):
-                self.sess.spawned = True
 
     def token_count(self, info):
+        """Credit the growth of the cumulative counts to the model now active."""
         usage = info.get("total_token_usage") if isinstance(info, dict) else None
         if not isinstance(usage, dict):
             return
-        total = as_int(usage.get("total_tokens"))
-        if total != self.last_total:
-            self.calls += 1
-            self.last_total = total
-        self.usage = usage
+        total, current = as_int(usage.get("total_tokens")), codex_tokens(usage)
+        if any(now < before for now, before in zip(current, self.last)):
+            self.meta["counter_decreases"] += 1
+        delta = tuple(max(0, now - before) for now, before in zip(current, self.last))
+        new_call = total != self.last_total
+        self.last, self.last_total = current, total
+        if not new_call and not any(delta):
+            return
+        agg = self.models.get(self.model, {"tokens": (0,) * len(KINDS), "calls": 0})
+        self.models[self.model] = {"tokens": tuple(a + b for a, b in zip(agg["tokens"], delta)),
+                                   "calls": agg["calls"] + new_call}
 
 
 def codex_texts(payload):
@@ -468,15 +568,15 @@ def codex_texts(payload):
 
 
 def finish_codex(state, store):
-    if state.usage is None:
-        return
+    """One call record per model; all carry the session start (Codex is filtered per session)."""
     ts = state.start or state.sess.first
-    store.other_calls.append(Call(state.sess.key, state.model, codex_tokens(state.usage),
-                                  ts, n=state.calls))
+    for model, agg in state.models.items():
+        store.other_calls.append(Call(state.sess.key, model, agg["tokens"], ts, n=agg["calls"]))
 
 
 def scan_codex(roots, store, since):
     meta = store.meta["codex"]
+    meta.update(counter_decreases=0)
     for root in roots:
         if not usable_root(root, "codex", meta):
             continue
@@ -484,7 +584,7 @@ def scan_codex(roots, store, since):
             if not may_hold_range(path, since, meta):
                 continue
             sess = store.session(f"codex:{path}", os.path.basename(path)[:-len(".jsonl")], "codex")
-            state = CodexState(sess)
+            state = CodexState(sess, meta)
             read_file(path, meta, state.handle)
             finish_codex(state, store)
 
@@ -505,10 +605,23 @@ def dsh_record(rec, sess, store):
         sess.touch(ms_to_ts(rec.get("createdAt")))
     elif kind == "user/message":
         sess.dispatches += sum(is_dispatch_prompt(t) for t in codex_texts(data))
-    elif kind == "tool/call" and spawns_workers(data.get("arguments")):
+    elif kind == "tool/call" and runs_launch(dsh_command(data)):
         sess.spawned = True
     elif kind == "assistant/message":
         dsh_call(rec, data, sess, store)  # never descends into data["stream"]
+
+
+def dsh_command(data):
+    """The command of a dsh "bash" tool call; its arguments are a JSON string."""
+    if data.get("name") != "bash":
+        return None
+    args = data.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    return args.get("command") if isinstance(args, dict) else None
 
 
 def dsh_call(rec, data, sess, store):

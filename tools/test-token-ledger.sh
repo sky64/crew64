@@ -357,4 +357,179 @@ done
 run --help >"$TMP/help.txt" 2>&1; rc=$?
 if [ "$rc" = 0 ] && grep -qi "per call" "$TMP/help.txt" && grep -qi "per session" "$TMP/help.txt" && grep -qi "cached_input_tokens" "$TMP/help.txt"; then ok "help states the date-filter granularity and the Codex token mapping"; else bad "help text incomplete rc=$rc"; fi
 
+# ---- 11 Codex model switch and executed launches (second fixture tree) --------------------------
+# A separate tree, so the fixtures and expected numbers of sections 1 to 10 stay as they are.
+FX2="$TMP/fx2"
+cat > "$TMP/gen2.py" <<'EOF'
+import json, os, sys, datetime as dt
+FX = sys.argv[1]
+MARK = "You are working inside Orca, a multi-agent IDE. You are a dispatched worker. "
+LAUNCH = "orca orchestration worker-start --agent codex --spec brief.md"
+
+def write(path, lines):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.writelines(json.dumps(ln) + "\n" for ln in lines)
+
+# Each role case: (task, dispatched?, tool kind, text). "shell" is the source's shell tool call;
+# "other" is a non-shell tool whose arguments contain the text.
+CASES = [
+    ("launch", False, "shell", LAUNCH),
+    ("grep-worker", True, "shell", 'rg -n "orchestration worker-start" docs'),
+    ("help", False, "shell", "orca orchestration worker-start --help"),
+    ("cd-launch", False, "shell", "cd dir && " + LAUNCH),
+    ("non-shell", False, "other", LAUNCH),
+    ("unbalanced", False, "shell", LAUNCH + ' --title "unbalanced'),
+]
+CLAUDE_ONLY = [
+    ("env-launch", False, "shell", "ORCA_X=1 /opt/bin/orca-dev orchestration worker-start --agent dsh"),
+    ("quoted-args", False, "shell", "echo 'orca orchestration worker-start'; git commit -m \"orca orchestration worker-start\" && grep -r 'orca orchestration worker-start' ."),
+    ("heredoc-body", False, "shell", "cat > brief.sh <<'EOF'\n" + LAUNCH + "\nEOF\nchmod +x brief.sh"),
+    ("heredoc-then-launch", False, "shell", "cat > note.txt <<EOF\ndon't stop\nEOF\n" + LAUNCH),
+    ("continued-launch", False, "shell", "orca orchestration \\\n  worker-start --agent codex"),
+    ("comment-only", False, "shell", "# " + LAUNCH + "\nls"),
+    ("pipe-launch", False, "shell", "true | " + LAUNCH + " --json 2>&1"),
+]
+
+# ---- Claude: tool_use name Bash, input.command ----
+def claude(task, dispatched, kind, text):
+    cwd, sid = "/v/claude-" + task, "c-" + task
+    tool = {"type": "tool_use", "name": "Bash", "input": {"command": text, "description": "d"}} if kind == "shell" \
+        else {"type": "tool_use", "name": "Write", "input": {"file_path": "/v/x.md", "content": text}}
+    lines = [{"type": "user", "timestamp": "2026-11-20T10:00:00Z", "cwd": cwd, "sessionId": sid,
+              "message": {"role": "user", "content": [{"type": "text", "text": (MARK if dispatched else "hi ") + "go"}]}},
+             {"type": "assistant", "timestamp": "2026-11-20T10:01:00Z", "cwd": cwd, "sessionId": sid,
+              "message": {"id": "m-" + task, "model": "opus-test", "role": "assistant", "content": [tool],
+                          "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                    "cache_creation_input_tokens": 0, "output_tokens": 1}}}]
+    if kind == "other":  # a search tool with the phrase as its pattern, too
+        lines.append({"type": "assistant", "timestamp": "2026-11-20T10:02:00Z", "cwd": cwd, "sessionId": sid,
+                      "message": {"id": "m2-" + task, "model": "opus-test", "role": "assistant",
+                                  "content": [{"type": "tool_use", "name": "Grep", "input": {"pattern": text}}]}})
+    write(FX + "/claude/-v/" + sid + ".jsonl", lines)
+
+# ---- Codex: event_msg item_completed, item CommandExecution, command [shell, -lc, script] ----
+def cx(ts, typ, payload):
+    return {"timestamp": ts, "type": typ, "payload": payload}
+def tc(ts, i, cached, o):
+    t = {"input_tokens": i, "cached_input_tokens": cached, "cache_write_input_tokens": 0,
+         "output_tokens": o, "reasoning_output_tokens": 0, "total_tokens": i + o}
+    return cx(ts, "event_msg", {"type": "token_count", "info": {"total_token_usage": t, "last_token_usage": t}})
+def codex_file(name, cwd, body):
+    write(FX + "/codex/2026/11/20/rollout-" + name + ".jsonl",
+          [cx("2026-11-20T10:00:00Z", "session_meta", {"id": name, "timestamp": "2026-11-20T10:00:00Z", "cwd": cwd})] + body)
+def codex(task, dispatched, kind, text):
+    body = [cx("2026-11-20T10:00:01Z", "turn_context", {"model": "gpt-test"})]
+    if dispatched:
+        body.append(cx("2026-11-20T10:00:02Z", "response_item", {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": MARK + "go"}]}))
+    if kind == "shell":
+        body.append(cx("2026-11-20T10:00:03Z", "event_msg", {"type": "item_completed", "item": {
+            "type": "CommandExecution", "id": "i1", "command": ["/bin/bash", "-lc", text], "cwd": "/v",
+            "exit_code": 0, "status": "completed", "source": "s", "aggregated_output": ""}}))
+    else:
+        body.append(cx("2026-11-20T10:00:03Z", "response_item", {"type": "custom_tool_call", "name": "apply_patch",
+                    "input": "*** Begin Patch\n+" + text}))
+        body.append(cx("2026-11-20T10:00:04Z", "response_item", {"type": "custom_tool_call", "name": "exec",
+                    "input": "await tools.exec_command({cmd: " + json.dumps(text) + "})"}))
+    body.append(tc("2026-11-20T10:01:00Z", 10, 0, 1))
+    codex_file(task, "/v/codex-" + task, body)
+
+# ---- dsh: tool/call name bash, arguments a JSON string with command ----
+t0 = int(dt.datetime(2026, 11, 20, 10, tzinfo=dt.timezone.utc).timestamp() * 1000)
+def dsh(task, dispatched, kind, text):
+    args = {"command": text, "description": "d"} if kind == "shell" else {"file_path": "/v/x.md", "content": text}
+    lines = [{"type": "session", "version": 4, "id": task, "createdAt": t0, "cwd": "/v/dsh-" + task},
+             {"type": "user/message", "seq": 1, "time": t0 + 1000, "data": {"role": "user",
+              "content": [{"type": "text", "text": (MARK if dispatched else "hi ") + "go"}]}},
+             {"type": "tool/call", "seq": 2, "time": t0 + 2000, "data": {"callId": "c",
+              "name": "bash" if kind == "shell" else "write", "arguments": json.dumps(args)}},
+             {"type": "assistant/message", "seq": 3, "time": t0 + 3000, "data": {
+              "message": {"role": "assistant", "content": [], "source": {"model": "dsh-model"}},
+              "usage": {"inputTokens": 1, "outputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0}}}]
+    write(FX + "/dsh-plain/" + task + ".jsonl", lines)
+
+for case in CASES + CLAUDE_ONLY:
+    claude(*case)
+for case in CASES:
+    codex(*case)
+    dsh(*case)
+
+# ---- Codex model switch ----
+def ctx(ts, model):
+    return cx(ts, "turn_context", {"model": model})
+# A at 100/10, a repeat of that total after the switch to B, B at 300/30, then a final switch to C with no usage.
+codex_file("switch", "/v/cx-switch", [
+    ctx("2026-11-20T11:00:01Z", "model-a"), tc("2026-11-20T11:01:00Z", 100, 0, 10),
+    ctx("2026-11-20T11:02:00Z", "model-b"), tc("2026-11-20T11:02:01Z", 100, 0, 10),
+    tc("2026-11-20T11:03:00Z", 300, 0, 30),
+    ctx("2026-11-20T11:04:00Z", "model-c"),
+])
+# With cached input: the per-model rows must add up to the mapping of the last cumulative record.
+codex_file("cached", "/v/cx-cached", [
+    ctx("2026-11-20T12:00:01Z", "model-a"), tc("2026-11-20T12:01:00Z", 100, 40, 10),
+    ctx("2026-11-20T12:02:00Z", "model-b"), tc("2026-11-20T12:03:00Z", 300, 100, 30),
+])
+# A cumulative counter that goes down (not seen in real logs): no negative count, counted in meta.
+codex_file("decrease", "/v/cx-decrease", [
+    ctx("2026-11-20T13:00:01Z", "model-a"), tc("2026-11-20T13:01:00Z", 300, 0, 30),
+    tc("2026-11-20T13:02:00Z", 200, 0, 40),
+])
+# Started the day before the range: all of its models drop out together.
+write(FX + "/codex/2026/11/19/rollout-early.jsonl", [
+    cx("2026-11-19T10:00:00Z", "session_meta", {"id": "early", "timestamp": "2026-11-19T10:00:00Z", "cwd": "/v/cx-early"}),
+    ctx("2026-11-19T10:00:01Z", "model-a"), tc("2026-11-19T10:01:00Z", 10, 0, 1),
+    ctx("2026-11-20T10:00:01Z", "model-b"), tc("2026-11-20T10:01:00Z", 30, 0, 3),
+])
+EOF
+"$PY" -I "$TMP/gen2.py" "$FX2" || { bad "fixture generation (second tree)"; exit 1; }
+for plain in "$FX2"/dsh-plain/*.jsonl; do
+  name="$(basename "$plain" .jsonl)"; mkdir -p "$FX2/dsh/--v-$name--/$name"
+  out="$FX2/dsh/--v-$name--/$name/session.v4.jsonl.zstd"
+  if command -v zstd >/dev/null 2>&1; then zstd -q -c "$plain" > "$out"
+  else "$PY" -I -c 'import sys; from compression import zstd; open(sys.argv[2],"wb").write(zstd.compress(open(sys.argv[1],"rb").read()))' "$plain" "$out" 2>/dev/null; fi
+done
+rm -rf "$FX2/dsh-plain"
+run2() {
+  HOME="$TMP/home" "$PY" -I "$LEDGER" --claude-root "$FX2/claude" --codex-root "$FX2/codex" \
+    --dsh-root "$FX2/dsh" --no-orca "$@"
+}
+run2 --format json >"$TMP/fx2.json" 2>"$TMP/fx2.err"; rc=$?
+[ "$rc" = 0 ] && ok "second tree: run exits 0" || bad "second tree: rc=$rc"
+
+chk "codex switch: model A keeps its 100/10 and one call" "$TMP/fx2.json" \
+  'tok(row("cx-switch",model="model-a"))==(100,0,0,10) and row("cx-switch",model="model-a")["calls"]==1'
+chk "codex switch: model B gets only the growth after the switch, 200/20, one call" "$TMP/fx2.json" \
+  'tok(row("cx-switch",model="model-b"))==(200,0,0,20) and row("cx-switch",model="model-b")["calls"]==1'
+chk "codex switch: a final turn_context without later usage creates no row" "$TMP/fx2.json" \
+  'not [r for r in d["rows"] if r["model"]=="model-c"] and len([r for r in d["rows"] if r["task"]=="cx-switch"])==2'
+chk "codex switch: an identical token_count repeated across the switch is no call and moves no tokens" "$TMP/fx2.json" \
+  'sum(r["calls"] for r in d["rows"] if r["task"]=="cx-switch")==2 and tuple(map(sum, zip(*[tok(r) for r in d["rows"] if r["task"]=="cx-switch"])))==(300,0,0,30)'
+chk "codex switch: per-model rows with cached input add up to the mapped last record" "$TMP/fx2.json" \
+  'tok(row("cx-cached",model="model-a"))==(60,40,0,10) and tok(row("cx-cached",model="model-b"))==(140,60,0,20)'
+chk "codex: a decreasing cumulative counter gives no negative count and is counted in meta" "$TMP/fx2.json" \
+  'tok(row("cx-decrease",agent="codex"))==(300,0,0,40) and row("cx-decrease",agent="codex")["calls"]==2 and d["summary"]["meta"]["codex"]["counter_decreases"]==1 and all(v>=0 for r in d["rows"] for v in tok(r))'
+chk "codex switch: real fixture has no counter decrease elsewhere" "$TMP/full.json" 'd["summary"]["meta"]["codex"]["counter_decreases"]==0'
+run2 --format json --since 2026-11-20 --until 2026-11-20 >"$TMP/fx2day.json" 2>/dev/null
+chk "codex switch: a session is filtered by its start day for every model" "$TMP/fx2day.json" \
+  'not [r for r in d["rows"] if r["task"]=="cx-early"] and len([r for r in d["rows"] if r["task"]=="cx-switch"])==2'
+chk "codex switch: without a filter the early session has both models" "$TMP/fx2.json" \
+  'tok(row("cx-early",model="model-a"))==(10,0,0,1) and tok(row("cx-early",model="model-b"))==(20,0,0,2)'
+
+roles() { # roles SOURCE "task role" ...
+  src="$1"; shift
+  for spec in "$@"; do
+    set -- $spec
+    chk "roles $src: $1 is $2" "$TMP/fx2.json" "row(\"$src-$1\")[\"role\"]==\"$2\""
+  done
+}
+for src in claude codex dsh; do
+  roles "$src" "launch orchestrator" "grep-worker worker" "help other" "cd-launch orchestrator" \
+    "non-shell other" "unbalanced other"
+done
+roles claude "env-launch orchestrator" "quoted-args other" "heredoc-body other" \
+  "heredoc-then-launch orchestrator" "continued-launch orchestrator" "comment-only other" "pipe-launch orchestrator"
+grep -qi "simple command" "$TMP/help.txt" && grep -qi "here-document" "$TMP/help.txt" && grep -qi "counter_decreases" "$TMP/help.txt" \
+  && ok "help states the executed-launch rule and the per-model Codex split" || bad "help: role rule or Codex split not described"
+
 exit $fail
