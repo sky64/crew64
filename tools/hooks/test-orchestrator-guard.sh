@@ -83,9 +83,19 @@ if [ -n "$tmpfs_base" ]; then
 else
   echo "skip TMPDIR positive cases: no writable tmpfs outside /tmp (XDG_RUNTIME_DIR, /dev/shm)"
 fi
-SCRH="$(mktemp -d -p "$HOME" guardtest.XXXXXX)"
-runenv TMPDIR="$SCRH" 2 "$M" Write "{\"file_path\":\"$SCRH/b.md\",\"content\":\"hi\"}"                 # TMPDIR on a non-tmpfs filesystem: not scratch
-rmdir "$SCRH"
+# A non-tmpfs directory outside any repository for the negative TMPDIR case: $HOME, then
+# /var/tmp (CI runners and test sandboxes may put HOME on a tmpfs); otherwise skipped.
+disk_base=""
+for cand in "$HOME" /var/tmp; do
+  [ -d "$cand" ] && [ -w "$cand" ] && case "$(stat -f -c %T "$cand" 2>/dev/null)" in tmpfs|ramfs|"") ;; *) disk_base="$cand"; break;; esac
+done
+if [ -n "$disk_base" ]; then
+  SCRH="$(mktemp -d -p "$disk_base" guardtest.XXXXXX)"
+  runenv TMPDIR="$SCRH" 2 "$M" Write "{\"file_path\":\"$SCRH/b.md\",\"content\":\"hi\"}"                 # TMPDIR on a non-tmpfs filesystem: not scratch
+  rmdir "$SCRH"
+else
+  echo "skip TMPDIR non-tmpfs case: neither \$HOME nor /var/tmp is a writable non-tmpfs directory"
+fi
 runenv TMPDIR="$M/tmp" 2 "$M" Write "{\"file_path\":\"$M/tmp/b.md\",\"content\":\"hi\"}"              # TMPDIR inside the repo: ignored
 run 2 "$M" Write  '{"file_path":"tmp/b.md","content":"hi"}'                                             # relative: not scratch
 # Codex review of PR 20, cycle 1: git metadata, skewed git discovery and bind mounts are never scratch.
