@@ -380,6 +380,9 @@ CASES = [
     ("cd-launch", False, "shell", "cd dir && " + LAUNCH),
     ("non-shell", False, "other", LAUNCH),
     ("unbalanced", False, "shell", LAUNCH + ' --title "unbalanced'),
+    # The re-review's two mentions, in a dispatched session: the session stays a worker.
+    ("rev-comment", True, "shell", "# Example only; orca orchestration worker-start --agent codex\nprintf ok"),
+    ("rev-quoted-semi", True, "shell", 'printf "%s\\n" ";" orca orchestration worker-start --agent codex'),
 ]
 CLAUDE_ONLY = [
     ("env-launch", False, "shell", "ORCA_X=1 /opt/bin/orca-dev orchestration worker-start --agent dsh"),
@@ -533,7 +536,7 @@ roles() { # roles SOURCE "task role" ...
 }
 for src in claude codex dsh; do
   roles "$src" "launch orchestrator" "grep-worker worker" "help other" "cd-launch orchestrator" \
-    "non-shell other" "unbalanced other"
+    "non-shell other" "unbalanced other" "rev-comment worker" "rev-quoted-semi worker"
 done
 roles claude "env-launch orchestrator" "quoted-args other" "heredoc-body other" \
   "heredoc-then-launch orchestrator" "continued-launch orchestrator" "comment-only other" "pipe-launch orchestrator"
@@ -542,5 +545,183 @@ roles claude "var-launch orchestrator" "braced-var-launch orchestrator" "bare-va
 grep -qi "shell variable" "$TMP/help.txt" && ok "help states the shell-variable launch rule" || bad "help: shell-variable launch rule not described"
 grep -qi "simple command" "$TMP/help.txt" && grep -qi "here-document" "$TMP/help.txt" && grep -qi "counter_decreases" "$TMP/help.txt" \
   && ok "help states the executed-launch rule and the per-model Codex split" || bad "help: role rule or Codex split not described"
+
+# ---- 12 Shell scanner table (runs_launch called directly) ------------------------------------
+# One check per row: (expected, name, script). expected is True when bash would execute the
+# Orca launch. Rows follow the rules in --help; the comments name the rule a row covers.
+cat > "$TMP/scan_rows.py" <<'EOF'
+L = "orca orchestration worker-start --agent codex"
+ROWS = [
+    # The re-review's two scripts and the three further defects.
+    (False, "comment holding a semicolon", "# Example only; " + L + "\nprintf ok"),
+    (False, "quoted semicolon argument", 'printf "%s\\n" ";" ' + L),
+    (True, "quoted << on an earlier line", 'echo "a << EOF"\n' + L),
+    (True, "launch as an if condition", "if " + L + "; then echo ok; fi"),
+    (False, "redirect target named orca", "echo hi > out.txt; cat < " + L),
+    # 1 quoting
+    (True, "single-quoted program", "'orca' orchestration worker-start"),
+    (True, "every word quoted", '"orca" "orchestration" \'worker-start\''),
+    (True, "adjacent quoted and plain parts", 'o"rc"a orch\'estr\'ation worker-start'),
+    (True, "backslash-escaped program", "\\orca orchestration worker-start"),
+    (False, "escaped double quote keeps the string open", 'echo "a \\" ; ' + L + '"'),
+    (True, "escaped backslash closes the string", 'echo "a \\\\"; ' + L),
+    (False, "ANSI-C string with an escaped quote", "echo $'it\\'s ; " + L + "'"),
+    (True, "ANSI-C string ends before the launch", "echo $'a\\\\'; " + L),
+    (False, "escaped semicolon", "echo hi\\; " + L),
+    (True, "backslash-newline inside a word", "orca orches\\\ntration worker-start"),
+    (True, "backslash-newline between words", "orca \\\n  orchestration \\\n  worker-start"),
+    # 2 unterminated quoting
+    (False, "unterminated double quote", L + ' --title "x'),
+    (False, "unterminated single quote", L + " --title 'x"),
+    (False, "unterminated ANSI-C string", L + " --title $'x"),
+    (False, "unterminated backtick", L + " --title `date"),
+    (False, "unterminated command substitution", L + " --title $(date"),
+    (False, "unterminated parameter expansion", L + " --title ${X:-a"),
+    # 3 comments
+    (False, "comment after a command on the same line", "ls # " + L),
+    (True, "comment line between two commands", "ls\n# do not run twice\n" + L),
+    (True, "comment after the launch", L + " # start it"),
+    (True, "a#b is one word", "echo a#b; " + L),
+    (False, "comment right after an operator", "echo x;# " + L),
+    (False, "comment swallows a later operator", "echo a #; " + L),
+    # 4 operators
+    (False, "quoted && argument", 'echo "&&" ' + L),
+    (False, "quoted | argument", 'echo "|" ' + L),
+    (False, "quoted ( argument", 'echo "(" ' + L),
+    (True, "after &&", "true && " + L),
+    (True, "after ||", "false || " + L),
+    (True, "after a background &", "sleep 1 & " + L),
+    (True, "pipe without spaces", "echo a|" + L),
+    (True, "inside ( ... )", "(" + L + ")"),
+    (True, "inside { ...; }", "{ " + L + "; }"),
+    # 5 redirections
+    (True, "2>&1 after the launch", L + " 2>&1"),
+    (True, ">/dev/null before the launch", ">/dev/null " + L),
+    (True, "redirects in the middle keep the arguments", "orca orchestration worker-start >/dev/null 2>&1 --agent codex"),
+    (True, "fd redirect before the program", "2>/dev/null " + L),
+    (True, "&> before the program", "&>/dev/null " + L),
+    (True, ">| after the launch", L + " >| out.log"),
+    (False, "output redirect target named orca", "echo > " + L),
+    (False, "fd input redirect target named orca", "cat 3< " + L),
+    (False, "&> target named orca", "echo hi &> " + L),
+    # 6 here-documents and here-strings
+    (False, "body of a quoted-delimiter here-document", "cat <<'EOF'\n" + L + "\nEOF"),
+    (True, "launch after a double-quoted-delimiter here-document", 'cat <<"EOF"\nx\nEOF\n' + L),
+    (False, "body of a <<- here-document", "cat <<-EOF\n\t" + L + "\n\tEOF\n"),
+    (True, "launch after a <<- here-document", "cat <<-EOF\n\tx\n\tEOF\n" + L),
+    (False, "here-document without its delimiter line", "cat <<EOF\n" + L),
+    (True, "<< inside a comment is text", "# cat <<EOF\n" + L),
+    (True, "launch on the here-document line", "cat <<EOF; " + L + "\nbody\nEOF"),
+    (True, "two here-documents, launch after both", "cat <<A <<B\na\nA\nb\nB\n" + L),
+    (False, "two here-documents, launch in the second body", "cat <<A <<B\nA\n" + L + "\nB"),
+    (False, "here-string argument named orca", "cat <<< " + L),
+    (True, "launch after a here-string", "cat <<< x; " + L),
+    # 7 command position
+    (True, "after then", "if true; then " + L + "; fi"),
+    (True, "after else", "if false; then :; else " + L + "; fi"),
+    (True, "after elif", "if false; then :; elif " + L + "; then :; fi"),
+    (True, "after do", "for i in 1; do " + L + "; done"),
+    (True, "after while", "while " + L + "; do break; done"),
+    (True, "after until", "until " + L + "; do :; done"),
+    (True, "after !", "! " + L),
+    (True, "after {", "{ " + L + "\n}"),
+    (True, "after time", "time " + L),
+    (True, "assignment after a reserved word", "if A=1 " + L + "; then :; fi"),
+    (True, "two assignments", "A=1 B='x y' " + L),
+    (False, "quoted reserved word is a program", '"if" ' + L),
+    (False, "reserved word as an argument", "echo if " + L),
+    (False, "quoted assignment is a program", '"A=1" ' + L),
+    (False, "! after an assignment is a program, as in bash", "A=1 ! " + L),
+    (False, "time after an assignment is a program, as in bash", "A=1 time " + L),
+    # 8 the launch words
+    (True, "orca-ide by path", "/usr/local/bin/orca-ide orchestration worker-start"),
+    (False, "another program name", "orcas orchestration worker-start"),
+    (True, "unquoted variable", "$ORCA_CLI_COMMAND orchestration worker-start"),
+    (True, "double-quoted braced variable with default", '"${ORCA_CLI:-orca}" orchestration worker-start'),
+    (False, "single-quoted variable is literal text", "'$ORCA_CLI_COMMAND' orchestration worker-start"),
+    (False, "--help", L + " --help"),
+    (False, "another subcommand", "orca orchestration worker-list"),
+    (False, "the subcommand words in one quoted word", 'orca orchestration "worker-start --agent x"'),
+    (False, "words in the wrong order", "orca worker-start orchestration"),
+    # 9 not followed by design
+    (False, "inside command substitution", 'echo "$(' + L + ')"'),
+    (False, "inside command substitution of an assignment", "x=$(" + L + ")"),
+    (False, "inside backticks", "echo `" + L + "`"),
+    (False, "inside process substitution", "cat <(" + L + ")"),
+    (False, "nested shell", "bash -c '" + L + "'"),
+    (False, "wrapper env", "env " + L),
+    (False, "wrapper sudo", "sudo " + L),
+    (False, "wrapper timeout", "timeout 5 " + L),
+    (False, "wrapper xargs", "echo | xargs " + L),
+    (False, "wrapper exec", "exec " + L),
+    (True, "operators inside a quoted $(...) argument", L + ' --title "$(date; echo x)"'),
+    (True, "operators inside an unquoted $(...) argument", L + " --title $(a && b | c)"),
+    (False, "semicolon inside $(...) does not end the outer command", "echo $(ls; ) " + L),
+    (True, "operators inside ${...}", L + ' --spec "${SPEC:-a;b}"'),
+    (False, "operators inside backticks", "echo `true; echo` " + L),
+    # Self-attack: mentions that bash does not execute (checked against bash with a stub orca).
+    (False, "attack: launch in a here-document inside $(...)", "git commit -m \"$(cat <<'EOF'\n" + L + "\nEOF\n)\""),
+    (False, "attack: echo of the launch", "echo " + L),
+    (False, "attack: printf to a file", "printf '%s\\n' '" + L + "' > notes.md"),
+    (False, "attack: here-document body with a substitution", "cat > f <<EOF\n$(date) " + L + "\nEOF"),
+    (False, "attack: grep with a here-string", 'grep -c "' + L + '" <<< "$LOG"'),
+    (False, "attack: colon builtin", ": " + L),
+    (False, "attack: comment holding &&", "true # && " + L),
+    (False, "attack: escaped semicolon word", "echo \\; " + L),
+    (False, "attack: alias definition", "alias o='" + L + "'"),
+    (False, "attack: newline inside double quotes", 'echo "a\n' + L + '"'),
+    (False, "attack: test expression", '[ "$x" = "' + L + '" ] && echo yes'),
+    (False, "attack: ANSI-C string holding a semicolon", "echo $'\\'; " + L + "\\''"),
+    (False, "attack: here-document with a pipe on its line", "cat <<EOF | sed s/a/b/\n" + L + "\nEOF"),
+    (False, "attack: quoted delimiter with a space", "cat <<'A B'\n" + L + "\nA B\nls"),
+    (False, "attack: backslash-quoted delimiter", "cat <<\\EOF\n" + L + "\nEOF"),
+    (False, "attack: inside a parameter default", "echo ${X:-" + L + "}"),
+    (False, "attack: shebang and comment", "#!/bin/bash\n# " + L),
+    (False, "attack: comment holding quotes", "echo 'x' # it's \"" + L + "\""),
+    (False, "attack: append to a log", "echo " + L + " >> log.md"),
+    (False, "attack: <<- delimiter indented with spaces is not the end", "cat <<-EOF\n\t" + L + "\n    EOF\n" + L + "\nEOF"),
+    (False, "attack: assignment of the launch text", "x='" + L + "'"),
+    (False, "attack: unbalanced quote inside a here-document body", "cat <<EOF\n\"\n" + L + "\nEOF"),
+    # Self-attack: unusual but valid executions (checked the same way).
+    (True, "attack: launch after a here-document in $(...) with an apostrophe", "git commit -m \"$(cat <<'EOF'\ndon't\nEOF\n)\"; " + L),
+    (True, "attack: comment with an apostrophe, launch next line", "ls # don't\n" + L),
+    (True, "attack: semicolon without spaces", "cd /tmp;" + L),
+    (True, "attack: tabs between words", "orca\torchestration\tworker-start"),
+    (True, "attack: assignment, quoted variable and a substitution argument", 'ORCA_X=1 "$ORCA_CLI_COMMAND" orchestration worker-start --spec "$(cat brief.md)"'),
+    (True, "attack: group with redirect and pipe", "{ " + L + "; } 2>&1 | tee log"),
+    (True, "attack: if !", "if ! " + L + "; then exit 1; fi"),
+    (True, "attack: time -p", "time -p " + L),
+    (True, "attack: nested quotes with ) inside $(...)", L + " --title \"$(printf '%s' \"a)b\")\""),
+    (True, "attack: after an assignment from $(...)", "out=$(date) && " + L),
+    (True, "attack: here-document with a redirect on its line", "cat <<EOF >brief.md\nhello; orca\nEOF\n" + L + " --spec brief.md"),
+    (True, "attack: quote-concatenated argument", L + " --title 'it'\"'\"'s'"),
+    (True, "attack: launch reading a here-document", L + " --spec - <<'EOF'\nbody\nEOF"),
+    (True, "attack: inside a while loop with input redirect", "while read x; do " + L + "; done < /dev/null\n" + L),
+    (True, "attack: escaped quotes outside quotes", L + ' --title \\"x\\"'),
+    (True, "attack: background launch", L + ' --spec "${SPEC}" &'),
+    (True, "attack: double-quoted absolute path", '"/opt/orca/bin/orca" orchestration worker-start'),
+    (True, "attack: piped into jq", "echo start; " + L + " | jq ."),
+    (True, "attack: after ||", "[ -f x ] || " + L),
+    (True, "attack: # inside a quoted argument", L + ' --title "a # b"'),
+    (True, "attack: here-document in $(...) inside the launch arguments", L + " --title \"$(cat <<'EOF'\nit's\nEOF\n)\""),
+    (True, "attack: comment inside $(...) with an apostrophe", L + " --title \"$(echo a # it's\n)\""),
+    (True, "attack: arithmetic shift is not a here-document", "echo $((1<<2))\n" + L),
+    (True, "attack: arithmetic shift inside an argument", L + ' --n "$((1 << 3))"\nls'),
+    (True, "attack: case pattern inside $(...)", L + " --title \"$(case x in x) echo a;; esac)\""),
+]
+EOF
+SCAN='import sys
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import token_ledger, scan_rows
+for expected, name, script in scan_rows.ROWS:
+    got = token_ledger.runs_launch(script)
+    print(("ok   " if got is expected else "FAIL ") + "scanner: " + name
+          + ("" if got is expected else " (expected %s, got %s)" % (expected, got)))'
+"$PY" -I -c "$SCAN" "$ROOT/tools" "$TMP" >"$TMP/scan.out" 2>&1 || bad "scanner table: import or run failed"
+cat "$TMP/scan.out"
+grep -q '^FAIL' "$TMP/scan.out" && fail=1
+[ "$(grep -c '^ok   scanner: ' "$TMP/scan.out")" -ge 140 ] || bad "scanner table: fewer rows passed than expected"
+grep -qi "command substitution" "$TMP/help.txt" && grep -qi "wrapper" "$TMP/help.txt" && grep -qi "comment" "$TMP/help.txt" \
+  && ok "help states the scanner rules and its limits" || bad "help: scanner rules or limits not described"
 
 exit $fail

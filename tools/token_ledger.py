@@ -15,7 +15,6 @@ import itertools
 import json
 import os
 import re
-import shlex
 import shutil
 import statistics
 import subprocess
@@ -36,11 +35,20 @@ ORCA_VARIABLE_PART = "orca"  # e.g. ORCA_CLI_COMMAND, the variable this reposito
 LAUNCH_WORDS = ["orchestration", "worker-start"]
 LAUNCH_HINT = "worker"  # cheap pre-check; every launch command contains it
 HELP_FLAG = "--help"
-SHELL_OPERATOR_CHARS = "();<>|&\n"
-SHELL_WHITESPACE = " \t\r"
+BLANKS = " \t\r"
+WORD_END = BLANKS + "\n;&|()<>"
+COMMAND_END = ";&|()"  # and newline
+REDIRECTS = ("<<<", "<<-", "<<", "&>>", "&>", ">>", "<&", ">&", "<>", ">|", "<", ">")  # longest first
+HEREDOC_STRIP_TABS = "<<-"
+HERE_STRING = "<<<"
+HEREDOC_OPERATORS = frozenset({"<<", HEREDOC_STRIP_TABS})
+GROUP_CLOSE = {"(": ")", "{": "}"}
+DOUBLE_QUOTE_ESCAPE = re.compile(r'\\([$`"\\\n])')
+ANSI_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+RESERVED_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"})
+TIME_POSIX_FLAG = "-p"
 SHELLS = frozenset({"bash", "sh", "zsh"})
 SHELL_SCRIPT_FLAGS = frozenset({"-c", "-lc"})
-HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 ORCA_LINE = "You are working inside Orca"
 WORKER_LINE = "You are a dispatched worker"
@@ -65,18 +73,33 @@ its parent session. task = last path component of the session cwd.
 Launch rule: only shell tool calls are read (Claude: tool_use "Bash",
 input.command; Codex: event_msg item_completed with item type
 "CommandExecution", command [bash, -lc, script]; dsh: tool/call "bash",
-arguments.command). Here-document bodies are dropped, backslash-newline is
-joined, and the script is split quote-aware (shlex) into simple commands at
-shell operators and newlines; words from one starting with "#" are a comment.
-A simple command is a launch when, after any VAR=value words, its program is
-orca, orca-ide or orca-dev by basename, or is one shell variable whose name
-contains "orca" in any case ($ORCA_CLI_COMMAND, ${ORCA_CLI_COMMAND:-orca}),
-its next words are "orchestration worker-start", and it has no --help. The
-variable's value is not known to the ledger; the subcommand words decide. A
-variable with any other name, or a variable that is only part of the program
-word, is not a launch. Text in other tools' arguments or in a
-quoted argument of another program is not a launch, and neither is a command
-that cannot be tokenized.
+arguments.command). The script is read by a small shell word scanner, not
+run: single quotes, double quotes (a backslash escapes), $'...' and backslash
+escapes are honoured; backslash-newline joins lines; adjacent quoted and plain
+parts are one word. "#" at the start of a word outside quotes is a comment to
+the end of the line ("a#b" is one word). Outside quotes only, ; & && | || ( )
+and newline end a simple command; a quoted ";" is an argument. A redirection
+(< > >> <& >& <> >| &> &>> with an optional fd number) does not end it; the
+word after it is its target, never the program. A here-document (<< or <<-,
+outside quotes and comments) skips the lines after its line up to the
+delimiter line, or to the end of the script when it is missing; <<< takes one
+word. A simple command is a launch when, after the unquoted reserved words if
+then else elif do while until ! { time and then any VAR=value words, its
+program is orca, orca-ide or orca-dev by basename, or is one shell variable
+whose name contains "orca" in any case ($ORCA_CLI_COMMAND,
+${ORCA_CLI_COMMAND:-orca}), unquoted or in double quotes, its next words are
+"orchestration worker-start", and no word is --help. The variable's value is
+not known to the ledger; the subcommand words decide. A single-quoted
+'$ORCA_CLI_COMMAND', a variable with any other name, or a variable that is
+only part of the program word is not a launch. Text in other tools' arguments
+or in a quoted argument of another program is not a launch. A script with an
+unterminated quote, $(, ${, <( or backtick cannot be tokenized and has no
+launch. Limits, by design: command substitution ($(...) and backticks) and
+process substitution stay part of their word and are never read as commands
+(their quotes, comments and here-documents are tracked only to find their end,
+so operators inside them do not end the outer command); a nested shell
+(bash -c '...') and wrapper programs (env, sudo, timeout, xargs, exec) are not
+followed; a function body is read like any other command.
 
 Date range (UTC days, both ends inclusive):
   Claude and dsh are filtered per call, by the call's own timestamp.
@@ -176,57 +199,252 @@ def text_parts(content):
             yield block["text"]
 
 
-def strip_heredocs(script):
-    """Drop here-document bodies: their lines are input data, not commands."""
-    lines, kept, i = script.split("\n"), [], 0
-    while i < len(lines):
-        line = lines[i]
-        kept.append(line)
-        i += 1
-        found = HEREDOC.search(line)
-        if found is None:
-            continue
-        tabs, end = found.group(1), found.group(3)
-        while i < len(lines) and (lines[i].lstrip("\t") if tabs else lines[i]) != end:
-            i += 1
-        i += 1  # the delimiter line
-    return "\n".join(kept)
+# ---- shell word scanner ---------------------------------------------------
+# Reads a shell script far enough to find its simple commands; it does not run or
+# expand anything. Every rule is stated in --help under "Launch rule".
+
+Word = collections.namedtuple("Word", "text raw quoted")  # text: quotes removed; raw: as written
 
 
-def simple_commands(script):
-    """Split a shell script into the word lists of its simple commands.
+def close_single(s, i):
+    """Index after the ' that closes a single-quoted string whose body starts at i."""
+    end = s.find("'", i)
+    if end < 0:
+        raise ValueError("unterminated single quote")
+    return end + 1
 
-    Raises ValueError when the script cannot be tokenized (an unbalanced quote).
-    """
-    lexer = shlex.shlex(strip_heredocs(script).replace("\\\n", " "), posix=True,
-                        punctuation_chars=SHELL_OPERATOR_CHARS)
-    lexer.whitespace = SHELL_WHITESPACE
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    commands, words = [], []
-    for token in list(lexer):
-        if token and all(ch in SHELL_OPERATOR_CHARS for ch in token):
-            commands.append(words)
-            words = []
+
+def close_escaped(s, i, quote):
+    """Index after the quote that closes a $'...' string or a backtick span; backslash escapes."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == quote:
+            return i + 1
         else:
-            words.append(token)
-    commands.append(words)
-    return [w for w in commands if w]
+            i += 1
+    raise ValueError("unterminated " + quote)
+
+
+def close_double(s, i):
+    """Index after the " that closes a double-quoted string whose body starts at i."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == '"':
+            return i + 1
+        else:
+            i = skip_expansion(s, i)
+    raise ValueError("unterminated double quote")
+
+
+def skip_expansion(s, i):
+    """Index after a $(...), $((...)), ${...} or backtick span at i, else i + 1."""
+    if s[i] == "`":
+        return close_escaped(s, i + 1, "`")
+    if s.startswith("$((", i):
+        return close_group(s, i + 2, "(", commands=False)
+    if s[i] == "$" and s[i + 1:i + 2] in GROUP_CLOSE:
+        return close_group(s, i + 2, s[i + 1], commands=s[i + 1] == "(")
+    return i + 1
+
+
+def close_group(s, i, opener, commands=True):
+    """Index after the bracket that closes a group whose body starts at i.
+
+    commands: the body is a command list ($( or <(), so it has comments and here-documents.
+    """
+    closer, depth, start, heredocs = GROUP_CLOSE[opener], 1, i, []
+    while i < len(s):
+        c = s[i]
+        if c in (opener, closer):
+            depth += 1 if c == opener else -1
+            i += 1
+            if depth == 0:
+                return i
+        elif commands:
+            i = command_list_step(s, i, start, heredocs)
+        else:
+            i = group_step(s, i)
+    raise ValueError("unterminated " + opener)
+
+
+def group_step(s, i):
+    """Index after the quoting construct, expansion or character at i inside a group."""
+    c = s[i]
+    if c == "\\":
+        return i + 2
+    if c == "'":
+        return close_single(s, i + 1)
+    if c == '"':
+        return close_double(s, i + 1)
+    if s.startswith("$'", i):
+        return close_escaped(s, i + 2, "'")
+    return skip_expansion(s, i)
+
+
+def command_list_step(s, i, start, heredocs):
+    """group_step, plus the comments and here-documents of a command list."""
+    c = s[i]
+    if c == "#" and (i == start or s[i - 1] in WORD_END):
+        end = s.find("\n", i)
+        return len(s) if end < 0 else end
+    if c == "\n":
+        i = skip_heredoc_bodies(s, i + 1, heredocs)
+        heredocs.clear()
+        return i
+    if s.startswith("<<", i) and not s.startswith(HERE_STRING, i):
+        return read_heredoc_delimiter(s, i, heredocs)
+    return group_step(s, i)
+
+
+def read_heredoc_delimiter(s, i, heredocs):
+    """Index after the << or <<- operator at i and its delimiter word, which joins heredocs."""
+    strip_tabs = s.startswith(HEREDOC_STRIP_TABS, i)
+    i += len(HEREDOC_STRIP_TABS) if strip_tabs else len(HEREDOC_STRIP_TABS) - 1
+    while i < len(s) and s[i] in BLANKS:
+        i += 1
+    if i >= len(s) or s[i] in WORD_END:
+        raise ValueError("here-document without a delimiter")
+    word, i = read_word(s, i)
+    heredocs.append((word.text, strip_tabs))
+    return i
+
+
+def word_piece(s, i):
+    """(end, text, quoted) of one quoting construct, expansion or plain character at i."""
+    c, nxt = s[i], s[i + 1:i + 2]
+    if c == "\\":
+        return (i + 2, "", False) if nxt == "\n" else (i + 2, nxt, True)
+    if c == "'":
+        end = close_single(s, i + 1)
+        return end, s[i + 1:end - 1], True
+    if c == '"':
+        end = close_double(s, i + 1)
+        return end, DOUBLE_QUOTE_ESCAPE.sub(unescape, s[i + 1:end - 1]), True
+    if c == "$" and nxt == "'":
+        end = close_escaped(s, i + 2, "'")
+        return end, ANSI_ESCAPE.sub(unescape, s[i + 2:end - 1]), True
+    end = skip_expansion(s, i)
+    return end, s[i:end], False
+
+
+def unescape(match):
+    """Escape letters such as \\n are not decoded; only the quoted character matters here."""
+    return "" if match.group(1) == "\n" else match.group(1)
+
+
+def read_word(s, i):
+    """(Word, end) of the word at i; a <( or >( at its start is process substitution."""
+    start, parts, quoted = i, [], False
+    if s[i] in "<>":
+        i = close_group(s, i + 2, "(")
+        parts.append(s[start:i])
+    while i < len(s) and s[i] not in WORD_END:
+        i, text, piece_quoted = word_piece(s, i)
+        parts.append(text)
+        quoted = quoted or piece_quoted
+    return Word("".join(parts), s[start:i], quoted), i
+
+
+def skip_heredoc_bodies(s, i, heredocs):
+    """Index after the bodies of the here-documents opened on the line that ended before i."""
+    for delimiter, strip_tabs in heredocs:
+        while i < len(s):
+            end = s.find("\n", i)
+            line, i = (s[i:], len(s)) if end < 0 else (s[i:end], end + 1)
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+    return i
+
+
+class ShellScanner:
+    """Split a shell script into its simple commands, each a list of Words.
+
+    Redirect targets, here-string words and file descriptor numbers are left out.
+    Raises ValueError when the script cannot be tokenized.
+    """
+
+    def __init__(self, script):
+        self.s, self.i = script, 0
+        self.commands, self.words = [], []
+        self.heredocs = []  # (delimiter, strip_tabs) whose bodies start after this line
+        self.expect = None  # the redirect operator whose target word comes next
+
+    def scan(self):
+        s = self.s
+        while self.i < len(s):
+            c = s[self.i]
+            if c in BLANKS:
+                self.i += 1
+            elif s.startswith("\\\n", self.i):
+                self.i += 2
+            elif c == "#":  # between words, so at the start of one
+                end = s.find("\n", self.i)
+                self.i = len(s) if end < 0 else end
+            elif c == "\n":
+                self.end_command()
+                self.i = skip_heredoc_bodies(s, self.i + 1, self.heredocs)
+                self.heredocs = []
+            elif s.startswith("&>", self.i) or (c in "<>" and s[self.i + 1:self.i + 2] != "("):
+                self.redirect()
+            elif c in COMMAND_END:
+                self.end_command()
+                self.i += 1
+            else:
+                self.word()
+        self.end_command()
+        return [words for words in self.commands if words]
+
+    def end_command(self):
+        if self.expect is not None:
+            raise ValueError("redirect without a target")
+        self.commands.append(self.words)
+        self.words = []
+
+    def redirect(self):
+        if self.expect is not None:
+            raise ValueError("redirect without a target")
+        self.expect = next(op for op in REDIRECTS if self.s.startswith(op, self.i))
+        self.i += len(self.expect)
+
+    def word(self):
+        word, self.i = read_word(self.s, self.i)
+        operator, self.expect = self.expect, None
+        if operator in HEREDOC_OPERATORS:
+            self.heredocs.append((word.text, operator == HEREDOC_STRIP_TABS))
+        elif operator is None and not (word.raw.isdigit() and self.s[self.i:self.i + 1] in ("<", ">")):
+            self.words.append(word)  # a target or a file descriptor number is not a word
+
+
+def program_index(words):
+    """Index of the program: after reserved words, then NAME=value words."""
+    i = 0
+    while i < len(words) and not words[i].quoted and words[i].text in RESERVED_WORDS:
+        i += 1
+        if words[i - 1].text == "time" and i < len(words) and words[i].raw == TIME_POSIX_FLAG:
+            i += 1
+    while i < len(words) and ASSIGNMENT.match(words[i].raw):
+        i += 1
+    return i
 
 
 def is_launch(words):
-    words = list(itertools.takewhile(lambda w: not w.startswith("#"), words))
-    start = next((i for i, w in enumerate(words) if not ASSIGNMENT.match(w)), len(words))
-    program, rest = words[start:start + 1], words[start + 1:]
-    return bool(program) and is_orca_program(program[0]) \
-        and rest[:len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in rest
+    start = program_index(words)
+    if start >= len(words) or not is_orca_program(words[start]):
+        return False
+    texts = [word.text for word in words]
+    return texts[start + 1:start + 1 + len(LAUNCH_WORDS)] == LAUNCH_WORDS and HELP_FLAG not in texts
 
 
 def is_orca_program(word):
     """True for the Orca CLI by basename, or for one shell variable named after it."""
-    if os.path.basename(word) in ORCA_PROGRAMS:
+    if os.path.basename(word.text) in ORCA_PROGRAMS:
         return True
-    variable = PROGRAM_VARIABLE.match(word)
+    raw = word.raw
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        raw = raw[1:-1]
+    variable = PROGRAM_VARIABLE.match(raw)
     return variable is not None \
         and ORCA_VARIABLE_PART in (variable.group(1) or variable.group(2)).lower()
 
@@ -236,8 +454,8 @@ def runs_launch(script):
     if not isinstance(script, str) or LAUNCH_HINT not in script:
         return False
     try:
-        commands = simple_commands(script)
-    except ValueError:
+        commands = ShellScanner(script).scan()
+    except (ValueError, RecursionError):
         return False
     return any(is_launch(words) for words in commands)
 
